@@ -667,4 +667,6 @@ static inline int omap_cfg_reg(unsigned long reg_cfg) { return 0; }
 
 extern int omap2_mux_init(void);
 
+extern int omap_gpio_out_init( void );
+extern int set_wakeup_gpio( void );
 #endif

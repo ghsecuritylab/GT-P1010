@@ -37,6 +37,8 @@
 static int debug;
 module_param(debug, int, 0644);
 
+
+
 MODULE_DESCRIPTION("helper module to manage video4linux buffers");
 MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@infradead.org>");
 MODULE_LICENSE("GPL");
@@ -78,7 +80,7 @@ EXPORT_SYMBOL_GPL(videobuf_alloc);
 int videobuf_waiton(struct videobuf_buffer *vb, int non_blocking, int intr)
 {
 	MAGIC_CHECK(vb->magic, MAGIC_BUFFER);
-
+	int rval=0;
 	if (non_blocking) {
 		if (WAITON_CONDITION)
 			return 0;
@@ -87,7 +89,21 @@ int videobuf_waiton(struct videobuf_buffer *vb, int non_blocking, int intr)
 	}
 
 	if (intr)
+	{
+//NCB-TI CSR: OMAPS00236881 Froyo Patch migration
+#if 0 	/* [ Samsung ESD camera defense ] */
 		return wait_event_interruptible(vb->done, WAITON_CONDITION);
+#else
+		rval = wait_event_interruptible_timeout(vb->done, WAITON_CONDITION,msecs_to_jiffies(1000));
+		
+		if(rval == 0)
+			rval = - ERESTARTSYS;
+		if(rval > 0)	
+			rval = 0;
+		return rval;
+#endif	
+//NCB-TI	
+	}
 	else
 		wait_event(vb->done, WAITON_CONDITION);
 
@@ -626,8 +642,19 @@ checks:
 			/* Checking list_empty and streaming is safe without
 			 * locks because we goto checks to validate while
 			 * holding locks before proceeding */
+//NCB-TI CSR: OMAPS00236881 Froyo Patch migration			 
+#if 0		/* [ Samsung ESD camera defense ] */
 			retval = wait_event_interruptible(q->wait,
 				!list_empty(&q->stream) || !q->streaming);
+#else
+			retval = wait_event_interruptible_timeout(q->wait, 
+			  !list_empty(&q->stream) || !q->streaming, msecs_to_jiffies(1000));
+			if(retval == 0)
+			  retval = - ERESTARTSYS;
+			if(retval > 0)  
+			  retval = 0;
+#endif	
+//NCB-TI			
 			mutex_lock(&q->vb_lock);
 
 			if (retval)
@@ -710,6 +737,8 @@ int videobuf_streamon(struct videobuf_queue *q)
 	unsigned long flags = 0;
 	int retval;
 
+	
+
 	mutex_lock(&q->vb_lock);
 	retval = -EBUSY;
 	if (q->reading)
@@ -734,8 +763,15 @@ EXPORT_SYMBOL_GPL(videobuf_streamon);
 /* Locking: Caller holds q->vb_lock */
 static int __videobuf_streamoff(struct videobuf_queue *q)
 {
-	if (!q->streaming)
-		return -EINVAL;
+	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT
+			|| q->type == V4L2_BUF_TYPE_VBI_OUTPUT
+			|| q->type == V4L2_BUF_TYPE_SLICED_VBI_OUTPUT) {
+		if (list_empty(&q->stream))
+			return -EINVAL;
+	} else {
+		if (!q->streaming)
+			return 0;
+	}
 
 	videobuf_queue_cancel(q);
 

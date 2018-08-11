@@ -102,6 +102,12 @@ int rtc_valid_tm(struct rtc_time *tm)
 		|| ((unsigned)tm->tm_sec) >= 60)
 		return -EINVAL;
 
+#if 1 /*   To restrict updated range by CDMA time  */
+	if ( tm->tm_year > 136 ) { /* 1900+136 = 2036 (o) , 2037 (x) */
+		return -EINVAL;
+	}
+#endif
+
 	return 0;
 }
 EXPORT_SYMBOL(rtc_valid_tm);

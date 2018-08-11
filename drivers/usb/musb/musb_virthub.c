@@ -40,6 +40,7 @@
 #include <linux/time.h>
 #include <linux/timer.h>
 
+#include <plat/usb.h>
 #include <asm/unaligned.h>
 
 #include "musb_core.h"
@@ -49,6 +50,9 @@ static void musb_port_suspend(struct musb *musb, bool do_suspend)
 {
 	u8		power;
 	void __iomem	*mbase = musb->mregs;
+	struct device *dev = musb->controller;
+	struct musb_hdrc_platform_data *plat = dev->platform_data;
+	struct omap_musb_board_data *data = plat->board_data;
 
 	if (!is_host_active(musb))
 		return;
@@ -64,6 +68,8 @@ static void musb_port_suspend(struct musb *musb, bool do_suspend)
 
 		power &= ~MUSB_POWER_RESUME;
 		power |= MUSB_POWER_SUSPENDM;
+		if (data->interface_type == MUSB_INTERFACE_UTMI)
+			power |= MUSB_POWER_ENSUSPEND;
 		musb_writeb(mbase, MUSB_POWER, power);
 
 		/* Needed for OPT A tests */
@@ -87,6 +93,11 @@ static void musb_port_suspend(struct musb *musb, bool do_suspend)
 					+ msecs_to_jiffies(
 						OTG_TIME_A_AIDL_BDIS));
 			musb_platform_try_idle(musb, 0);
+			/*
+			 * disable the phy clock when the device is supended.
+			 * this will allow the core retention
+			 */
+			otg_set_clk(musb->xceiv, 0);
 			break;
 #ifdef	CONFIG_USB_MUSB_OTG
 		case OTG_STATE_B_HOST:
@@ -102,9 +113,12 @@ static void musb_port_suspend(struct musb *musb, bool do_suspend)
 		}
 	} else if (power & MUSB_POWER_SUSPENDM) {
 		power &= ~MUSB_POWER_SUSPENDM;
+		if (data->interface_type == MUSB_INTERFACE_UTMI)
+			power &= ~MUSB_POWER_ENSUSPEND;
 		power |= MUSB_POWER_RESUME;
 		musb_writeb(mbase, MUSB_POWER, power);
 
+		otg_set_clk(musb->xceiv, 1);
 		DBG(3, "Root port resuming, power %02x\n", power);
 
 		/* later, GetPortStatus will stop RESUME signaling */
@@ -244,7 +258,7 @@ int musb_hub_control(
 
 	spin_lock_irqsave(&musb->lock, flags);
 
-	if (unlikely(!test_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags))) {
+	if (unlikely(!HCD_HW_ACCESSIBLE(hcd))) {
 		spin_unlock_irqrestore(&musb->lock, flags);
 		return -ESHUTDOWN;
 	}

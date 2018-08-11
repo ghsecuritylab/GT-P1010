@@ -69,7 +69,7 @@ static inline void flush(void)
 
 #define DEBUG_LL_OMAP1(p, mach)						\
 	_DEBUG_LL_ENTRY(mach, OMAP1_UART##p##_BASE, OMAP_PORT_SHIFT,	\
-		OMAP1UART##p)
+		OMAP1UART##p);
 
 #define DEBUG_LL_OMAP2(p, mach)						\
 	_DEBUG_LL_ENTRY(mach, OMAP2_UART##p##_BASE, OMAP_PORT_SHIFT,	\
@@ -145,8 +145,21 @@ static inline void __arch_decomp_setup(unsigned long arch_id)
 		DEBUG_LL_OMAP3(3, overo);
 		DEBUG_LL_OMAP3(3, touchbook);
 
+#if defined (CONFIG_MACH_OMAP_SAMSUNG)
+		/**
+		 * omap3 based samsung products
+		 * please see follwoing files.
+		 *	arch/arm/mach-omap2/Kconfig
+		 *	arch/arm/mach-omap2/samsung.mk
+		 */
+#define SEC_DEBUG_LL_OMAP3(p, mach)	DEBUG_LL_OMAP3(p, mach)
+		SEC_DEBUG_LL_OMAP3(CONFIG_SAMSUNG_CONSOLE_UART,
+				   _SAMSUNG_BOARD_NAME);
+#endif /* CONFIG_MACH_OMAP_SAMSUNG */
+
 		/* omap4 based boards using UART3 */
 		DEBUG_LL_OMAP4(3, omap_4430sdp);
+		DEBUG_LL_OMAP4(3, omap4_panda);
 
 		/* zoom2/3 external uart */
 		DEBUG_LL_ZOOM(omap_zoom2);

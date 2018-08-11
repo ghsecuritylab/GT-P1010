@@ -1353,11 +1353,14 @@ static int _regulator_disable(struct regulator_dev *rdev)
 {
 	int ret = 0;
 
-	if (WARN(rdev->use_count <= 0,
+/*	if (WARN(rdev->use_count <= 0,
 			"unbalanced disables for %s\n",
 			rdev_get_name(rdev)))
+		return -EIO;*/
+	if( rdev->use_count <= 0 ) {
+		printk("WARNING!! unbalanced disables for %s\n", rdev_get_name(rdev));
 		return -EIO;
-
+	}
 	/* are we the last user and permitted to disable ? */
 	if (rdev->use_count == 1 &&
 	    (rdev->constraints && !rdev->constraints->always_on)) {

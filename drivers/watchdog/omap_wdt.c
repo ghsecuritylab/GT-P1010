@@ -38,15 +38,24 @@
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/moduleparam.h>
-#include <linux/clk.h>
 #include <linux/bitops.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#ifdef CONFIG_PM_RUNTIME
+#include <linux/pm_runtime.h>
+#else
+#include <linux/clk.h>
+#endif
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+#include <linux/timer.h>
+#endif
 #include <mach/hardware.h>
 #include <plat/prcm.h>
+#include <plat/omap_device.h>
 
 #include "omap_wdt.h"
+#include <plat/control.h>
 
 static struct platform_device *omap_wdt_dev;
 
@@ -61,11 +70,61 @@ struct omap_wdt_dev {
 	void __iomem    *base;          /* physical */
 	struct device   *dev;
 	int             omap_wdt_users;
-	struct clk      *ick;
-	struct clk      *fck;
 	struct resource *mem;
 	struct miscdevice omap_wdt_miscdev;
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+	struct timer_list autopet_timer;
+	unsigned long  jiffies_start;
+	unsigned long  jiffies_exp;
+#endif
+
 };
+
+#include "../../arch/arm/mach-omap2/prcm-common.h"
+#include <linux/delay.h>
+
+void omap_watchdog_reset(void)
+{
+	u32 base = 0x48314000;
+	u32 cm_base_iclk = 0x48004C00;
+	u32 cm_base_fclk = 0x48004C10;
+	
+	u32 regval;
+	
+    omap_ctrl_writew(0x118, 0x0A08); // change pullup just before warm-reset
+
+	regval = omap_readl(cm_base_iclk);
+	regval |=  0x20;
+	omap_writel(regval, cm_base_iclk);
+	
+	regval = omap_readl(cm_base_fclk);
+	regval |=  0x20;
+	omap_writel(regval, cm_base_fclk);
+
+	/* initialize prescaler */
+	while (omap_readl(base + OMAP_WATCHDOG_WPS) & 0x01)
+		cpu_relax();
+	omap_writel((0 << 5) | (PTV << 2), base + OMAP_WATCHDOG_CNTRL);
+	while (omap_readl(base + OMAP_WATCHDOG_WPS) & 0x01)
+		cpu_relax();
+
+	while (omap_readl(base + OMAP_WATCHDOG_WPS) & 0x04)
+		cpu_relax();
+
+	omap_writel((0xFFFE88FF), base + OMAP_WATCHDOG_CRR); // 0xFFFE88FF: 3secs, 0xFFFD8EFF: 5secs, 0xFFFF82FF: 1sec
+
+	while (omap_readl(base + OMAP_WATCHDOG_WPS) & 0x04)
+		cpu_relax();
+
+	udelay(20);
+	omap_writel(0xBBBB, base + OMAP_WATCHDOG_SPR );
+	while (omap_readl(base + OMAP_WATCHDOG_WPS) & 0x10)
+		cpu_relax();
+
+	omap_writel(0x4444, base + OMAP_WATCHDOG_SPR );
+	
+	return;
+}
 
 static void omap_wdt_ping(struct omap_wdt_dev *wdev)
 {
@@ -135,6 +194,28 @@ static void omap_wdt_set_timeout(struct omap_wdt_dev *wdev)
 		cpu_relax();
 }
 
+static void omap_wdt_startclocks(struct omap_wdt_dev *wdev)
+{
+	void __iomem *base = wdev->base;
+
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_get_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_enable(wdev->ick);    /* Enable the interface clock */
+	clk_enable(wdev->fck);    /* Enable the functional clock */
+#endif
+
+
+	/* initialize prescaler */
+	while (__raw_readl(base + OMAP_WATCHDOG_WPS) & 0x01)
+		cpu_relax();
+
+	__raw_writel((1 << 5) | (PTV << 2), base + OMAP_WATCHDOG_CNTRL);
+	while (__raw_readl(base + OMAP_WATCHDOG_WPS) & 0x01)
+		cpu_relax();
+}
+
 /*
  *	Allow only one task to hold it open
  */
@@ -142,12 +223,16 @@ static int omap_wdt_open(struct inode *inode, struct file *file)
 {
 	struct omap_wdt_dev *wdev = platform_get_drvdata(omap_wdt_dev);
 	void __iomem *base = wdev->base;
-
 	if (test_and_set_bit(1, (unsigned long *)&(wdev->omap_wdt_users)))
 		return -EBUSY;
 
-	clk_enable(wdev->ick);    /* Enable the interface clock */
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_get_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_enable(wdev->ick);    /* Enable the interface clock */
 	clk_enable(wdev->fck);    /* Enable the functional clock */
+#endif
 
 	/* initialize prescaler */
 	while (__raw_readl(base + OMAP_WATCHDOG_WPS) & 0x01)
@@ -174,11 +259,16 @@ static int omap_wdt_release(struct inode *inode, struct file *file)
 	 *      Shut off the timer unless NOWAYOUT is defined.
 	 */
 #ifndef CONFIG_WATCHDOG_NOWAYOUT
-
 	omap_wdt_disable(wdev);
 
-	clk_disable(wdev->ick);
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_put_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_disable(wdev->ick);
 	clk_disable(wdev->fck);
+#endif
+
 #else
 	printk(KERN_CRIT "omap_wdt: Unexpected close, not stopping!\n");
 #endif
@@ -260,6 +350,21 @@ static const struct file_operations omap_wdt_fops = {
 	.release = omap_wdt_release,
 };
 
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+static void autopet_handler(unsigned long data)
+{
+	unsigned long flags;
+	struct omap_wdt_dev *wdev = (struct omap_wdt_dev *) data;
+
+	spin_lock_irqsave(&wdt_lock, flags);
+	omap_wdt_ping(wdev);
+	spin_unlock_irqrestore(&wdt_lock, flags);
+	wdev->jiffies_start = jiffies;
+	wdev->jiffies_exp = (HZ * TIMER_AUTOPET_FREQ);
+	mod_timer(&(wdev->autopet_timer), jiffies + wdev->jiffies_exp);
+}
+#endif
+
 static int __devinit omap_wdt_probe(struct platform_device *pdev)
 {
 	struct resource *res, *mem;
@@ -292,19 +397,7 @@ static int __devinit omap_wdt_probe(struct platform_device *pdev)
 
 	wdev->omap_wdt_users = 0;
 	wdev->mem = mem;
-
-	wdev->ick = clk_get(&pdev->dev, "ick");
-	if (IS_ERR(wdev->ick)) {
-		ret = PTR_ERR(wdev->ick);
-		wdev->ick = NULL;
-		goto err_clk;
-	}
-	wdev->fck = clk_get(&pdev->dev, "fck");
-	if (IS_ERR(wdev->fck)) {
-		ret = PTR_ERR(wdev->fck);
-		wdev->fck = NULL;
-		goto err_clk;
-	}
+	wdev->dev = &pdev->dev;
 
 	wdev->base = ioremap(res->start, resource_size(res));
 	if (!wdev->base) {
@@ -314,9 +407,14 @@ static int __devinit omap_wdt_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, wdev);
 
-	clk_enable(wdev->ick);
-	clk_enable(wdev->fck);
-
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_enable(wdev->dev);
+	pm_runtime_get_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_enable(wdev->ick);    /* Enable the interface clock */
+	clk_enable(wdev->fck);    /* Enable the functional clock */
+#endif
 	omap_wdt_disable(wdev);
 	omap_wdt_adjust_timeout(timer_margin);
 
@@ -332,15 +430,32 @@ static int __devinit omap_wdt_probe(struct platform_device *pdev)
 	pr_info("OMAP Watchdog Timer Rev 0x%02x: initial timeout %d sec\n",
 		__raw_readl(wdev->base + OMAP_WATCHDOG_REV) & 0xFF,
 		timer_margin);
-
-	/* autogate OCP interface clock */
-	__raw_writel(0x01, wdev->base + OMAP_WATCHDOG_SYS_CONFIG);
-
-	clk_disable(wdev->ick);
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_put_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_disable(wdev->ick);
 	clk_disable(wdev->fck);
+
+#endif
 
 	omap_wdt_dev = pdev;
 
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+	set_bit(1, (unsigned long *)&(wdev->omap_wdt_users));
+	setup_timer(&wdev->autopet_timer, autopet_handler,
+		    (unsigned long) wdev);
+	omap_wdt_startclocks(wdev);
+	omap_wdt_set_timeout(wdev);
+	wdev->jiffies_start = jiffies;
+	wdev->jiffies_exp = (HZ * TIMER_AUTOPET_FREQ);
+	mod_timer(&wdev->autopet_timer, jiffies + wdev->jiffies_exp);
+	omap_wdt_enable(wdev);
+	pr_info("Watchdog auto-pet enabled at %d sec intervals\n",
+		TIMER_AUTOPET_FREQ);
+	omap_wdt_ping(wdev);
+
+#endif
 	return 0;
 
 err_misc:
@@ -349,12 +464,6 @@ err_misc:
 
 err_ioremap:
 	wdev->base = NULL;
-
-err_clk:
-	if (wdev->ick)
-		clk_put(wdev->ick);
-	if (wdev->fck)
-		clk_put(wdev->fck);
 	kfree(wdev);
 
 err_kzalloc:
@@ -386,8 +495,15 @@ static int __devexit omap_wdt_remove(struct platform_device *pdev)
 	release_mem_region(res->start, resource_size(res));
 	platform_set_drvdata(pdev, NULL);
 
-	clk_put(wdev->ick);
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_put_sync(wdev->dev);
+	pm_runtime_disable(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_put(wdev->ick);
 	clk_put(wdev->fck);
+#endif
+
 	iounmap(wdev->base);
 
 	kfree(wdev);
@@ -410,13 +526,36 @@ static int omap_wdt_suspend(struct platform_device *pdev, pm_message_t state)
 
 	if (wdev->omap_wdt_users)
 		omap_wdt_disable(wdev);
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+	wdev->jiffies_exp = wdev->jiffies_exp - (jiffies - wdev->jiffies_start);
+	del_timer(&wdev->autopet_timer);
+#endif
 
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_put_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_put(wdev->ick);
+	clk_put(wdev->fck);
+#endif
 	return 0;
 }
 
 static int omap_wdt_resume(struct platform_device *pdev)
 {
 	struct omap_wdt_dev *wdev = platform_get_drvdata(pdev);
+
+#ifdef CONFIG_PM_RUNTIME
+	pm_runtime_get_sync(wdev->dev);
+#else
+	if (!cpu_is_omap44xx())
+		clk_get(wdev->ick);
+	clk_get(wdev->fck);
+#endif
+
+#ifdef CONFIG_OMAP_WATCHDOG_AUTOPET
+	mod_timer(&wdev->autopet_timer, jiffies + wdev->jiffies_exp);
+#endif
 
 	if (wdev->omap_wdt_users) {
 		omap_wdt_enable(wdev);

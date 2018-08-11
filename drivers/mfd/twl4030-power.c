@@ -31,6 +31,8 @@
 
 #include <asm/mach-types.h>
 
+#include <plat/smartreflex.h>
+
 static u8 twl4030_start_script_address = 0x2b;
 
 #define PWR_P1_SW_EVENTS	0x10
@@ -62,6 +64,10 @@ static u8 twl4030_start_script_address = 0x2b;
 #define	R_SEQ_ADD_WARM		PHY_TO_OFF_PM_MASTER(0x58)
 #define R_MEMORY_ADDRESS	PHY_TO_OFF_PM_MASTER(0x59)
 #define R_MEMORY_DATA		PHY_TO_OFF_PM_MASTER(0x5a)
+
+/* Smartreflex Control */
+#define R_DCDC_GLOBAL_CFG	PHY_TO_OFF_PM_RECEIVER(0x61)
+#define CFG_ENABLE_SRFLX	0x08
 
 #define R_PROTECT_KEY		0x0E
 #define R_KEY_1			0xC0
@@ -452,11 +458,13 @@ static int __init load_twl4030_script(struct twl4030_script *tscript,
 			goto out;
 	}
 	if (tscript->flags & TWL4030_SLEEP_SCRIPT)
-		if (order)
+		{
+		if (!order)
 			pr_warning("TWL4030: Bad order of scripts (sleep "\
 					"script before wakeup) Leads to boot"\
 					"failure on some boards\n");
 		err = twl4030_config_sleep_sequence(address);
+		}
 out:
 	return err;
 }
@@ -511,12 +519,36 @@ int twl4030_remove_script(u8 flags)
 	return err;
 }
 
+/* API to enable smrtreflex on Triton side */
+static void twl4030_smartreflex_init(void)
+{
+	int ret = 0;
+	u8 read_val;
+
+	ret = twl_i2c_read_u8(TWL4030_MODULE_PM_RECEIVER, &read_val,
+			R_DCDC_GLOBAL_CFG);
+	read_val |= CFG_ENABLE_SRFLX;
+	ret |= twl_i2c_write_u8(TWL4030_MODULE_PM_RECEIVER, read_val,
+			R_DCDC_GLOBAL_CFG);
+}
+
+struct omap_smartreflex_pmic_data twl4030_sr_data = {
+       .sr_pmic_init   = twl4030_smartreflex_init,
+};
+
+void __init twl4030_power_sr_init()
+{
+	/* Register the SR init API with the Smartreflex driver */
+	omap_sr_register_pmic(&twl4030_sr_data);
+}
+
 void __init twl4030_power_init(struct twl4030_power_data *twl4030_scripts)
 {
 	int err = 0;
 	int i;
 	struct twl4030_resconfig *resconfig;
 	u8 address = twl4030_start_script_address;
+	u8 reg_val = 0;
 
 	err = twl_i2c_write_u8(TWL4030_MODULE_PM_MASTER, R_KEY_1,
 				R_PROTECT_KEY);
@@ -545,6 +577,51 @@ void __init twl4030_power_init(struct twl4030_power_data *twl4030_scripts)
 
 		}
 	}
+
+#if 1
+    // Change VIO_1.8v from 1.8v to 1.85v [+]
+    err = twl_i2c_write_u8(TWL4030_MODULE_PM_RECEIVER, 0x01, 0x54);
+    if(err) {
+        pr_err("TWL4030 failed to write VIO_VSEL register!.\n");
+    }
+    else {
+        twl_i2c_read_u8(TWL4030_MODULE_PM_RECEIVER, &reg_val, 0x54);
+        pr_err("TWL4030 success to write VIO_VSEL register(= 0x%02x)!.\n", reg_val);
+    }
+    // Change VIO_1.8v from 1.8v to 1.85v [-]
+#endif
+	// Clear STARTON_RTC bit in CFG_Px_TRANSITION register [+]
+    err = twl_i2c_write_u8(TWL4030_MODULE_PM_MASTER, 0xe7, R_CFG_P1_TRANSITION);
+    if(err) {
+		pr_err("TWL4030 failed to write CFG_P1_TRANSITION register!.\n");
+        goto resource;
+    }
+
+    err = twl_i2c_write_u8(TWL4030_MODULE_PM_MASTER, 0xe7, R_CFG_P2_TRANSITION);
+    if(err) {
+		pr_err("TWL4030 failed to write CFG_P2_TRANSITION register!.\n");
+        goto resource;
+    }
+
+    err = twl_i2c_write_u8(TWL4030_MODULE_PM_MASTER, 0xe7, R_CFG_P3_TRANSITION);
+    if(err) {
+		pr_err("TWL4030 failed to write CFG_P3_TRANSITION register!.\n");
+        goto resource;
+    }
+    
+#if 0
+	u8 reg_val = 0;
+
+    twl_i2c_read_u8(TWL4030_MODULE_PM_MASTER, &reg_val, R_CFG_P1_TRANSITION);
+    printk("R_CFG_P1_TRANSITION = 0x%02x\n", reg_val);
+    twl_i2c_read_u8(TWL4030_MODULE_PM_MASTER, &reg_val, R_CFG_P2_TRANSITION);
+    printk("R_CFG_P2_TRANSITION = 0x%02x\n", reg_val);
+    twl_i2c_read_u8(TWL4030_MODULE_PM_MASTER, &reg_val, R_CFG_P3_TRANSITION);
+    printk("R_CFG_P3_TRANSITION = 0x%02x\n", reg_val);
+    twl_i2c_read_u8(TWL4030_MODULE_RTC, &reg_val, 0x0F);
+    printk("R_RTC_INTERRUPT_REG = 0x%02x\n", reg_val);
+#endif
+	// Clear STARTON_RTC bit in CFG_Px_TRANSITION register [-]
 
 	err = twl_i2c_write_u8(TWL4030_MODULE_PM_MASTER, 0, R_PROTECT_KEY);
 	if (err)

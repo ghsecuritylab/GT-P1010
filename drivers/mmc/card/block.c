@@ -35,20 +35,35 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
+#include <linux/mmc/mmc_ioctl.h>
 #include <linux/mmc/sd.h>
+#ifdef CONFIG_MMC_DISCARD_MERGE
+#include <linux/mmc/discard.h>
+#endif
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
 #include "queue.h"
 
+#define _MMC_SAFE_ACCESS_
+#ifdef _MMC_SAFE_ACCESS_
+extern int mmc_is_available;
+extern u8 omap_mmc1_ldo_status(void);
+#endif
+
+
 MODULE_ALIAS("mmc:block");
 
 /*
- * max 8 partitions per card
+ * max 16 partitions per card
  */
-#define MMC_SHIFT	3
+#define MMC_SHIFT	4
 #define MMC_NUM_MINORS	(256 >> MMC_SHIFT)
+
+#ifdef CONFIG_MMC_DISCARD
+#define DISCARD_THRESHOLD	65536 /* 32MB threadhold with 512byte sector unit */
+#endif
 
 static DECLARE_BITMAP(dev_use, MMC_NUM_MINORS);
 
@@ -86,11 +101,7 @@ static void mmc_blk_put(struct mmc_blk_data *md)
 	mutex_lock(&open_lock);
 	md->usage--;
 	if (md->usage == 0) {
-		int devmaj = MAJOR(disk_devt(md->disk));
-		int devidx = MINOR(disk_devt(md->disk)) >> MMC_SHIFT;
-
-		if (!devmaj)
-			devidx = md->disk->first_minor >> MMC_SHIFT;
+		int devidx = md->disk->first_minor >> MMC_SHIFT;
 
 		blk_cleanup_queue(md->queue.queue);
 
@@ -129,6 +140,113 @@ static int mmc_blk_release(struct gendisk *disk, fmode_t mode)
 	return 0;
 }
 
+#ifdef CONFIG_MMC_DISCARD
+static int check_eod(struct block_device *bdev, unsigned int from,
+		unsigned int nr)
+{
+	unsigned int maxsector;
+
+	if (!nr)
+		return 0;
+
+	maxsector = bdev->bd_inode->i_size >> 9;
+	if (maxsector && (maxsector < nr || maxsector - nr < from))
+		return 1;
+
+	return 0;
+}
+
+static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
+		unsigned cmd, unsigned long arg)
+{
+	int err;
+	struct mmc_blk_data *md = bdev->bd_disk->private_data;
+	struct mmc_card *card = md->queue.card;
+
+#if defined(CONFIG_TARGET_LOCALE_NTT)
+#ifdef CONFIG_MMC_CPRM
+	printk(" %s ], %x ", __func__, cmd);
+#endif
+#endif
+
+	switch (cmd) {
+		case MMCTRIMINFO:
+		{
+			struct mmc_blk_erase_info info;
+			if (!arg)
+				return -EINVAL;
+
+			mmc_claim_host(card->host);
+			if (!mmc_can_trim(card)) {
+				printk(KERN_ERR "MMCERASEINFO ioctl: MMC can not support trim operation.\n");
+                mmc_release_host(card->host);
+				return -EOPNOTSUPP;
+			}
+			info.pref_trim = card->pref_trim;
+			mmc_release_host(card->host);
+			if (copy_to_user((struct mmc_blk_erase_info __user *)arg, &info,
+						sizeof(struct mmc_blk_erase_info)))
+				return -EFAULT;
+
+			return 0;
+		}
+		case MMCTRIM:
+		{
+			struct mmc_blk_erase_args args;
+			if (!(mode & FMODE_WRITE)) {
+				printk(KERN_ERR "MMCERASE ioctl: File mode is not write mode.\n");
+				return -EBADF;
+			}
+
+			if (copy_from_user((char *)&args, (void __user *)arg,
+					       sizeof(struct mmc_blk_erase_args)))
+				return -EFAULT;
+
+			if (check_eod(bdev, args.from, args.nr)) {
+				printk(KERN_ERR "MMCERASE ioctl: File mode is not write mode.\n");
+				return -EINVAL;
+			}
+
+			mmc_claim_host(card->host);
+			if (!mmc_can_trim(card)) {
+				printk(KERN_ERR "MMCERASE ioctl: MMC can not support trim operation.\n");
+				mmc_release_host(card->host);
+				return -EOPNOTSUPP;
+			}
+
+			if (bdev != bdev->bd_contains)
+			       args.from += bdev->bd_part->start_sect;
+
+			err = mmc_erase(card, args.from, args.nr, MMC_TRIM_ARG);
+			mmc_release_host(card->host);
+			return err;
+	       }
+#if defined(CONFIG_TARGET_LOCALE_NTT)
+#ifdef CONFIG_MMC_CPRM
+		case ACMD13:
+		case ACMD18:
+		case ACMD25:
+		case ACMD43:
+		case ACMD44:
+		case ACMD45:
+		case ACMD46:
+		case ACMD47:
+		case ACMD48:
+		{
+			struct cprm_request *req = (struct cprm_request *)arg;
+			printk(KERN_DEBUG " ****** %s ] :: cmd [ %x ] \n", __func__, cmd);
+			return stub_sendcmd(card, req->cmd, req->arg, req->len, req->buff);
+		}
+		default:
+		{
+			printk(" %s ERROR\n", __func__);
+		}
+#endif
+#endif
+	}
+	return -ENOTTY;
+}
+#endif /* CONFIG_MMC_DISCARD */
 static int
 mmc_blk_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 {
@@ -141,6 +259,9 @@ mmc_blk_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 static const struct block_device_operations mmc_bdops = {
 	.open			= mmc_blk_open,
 	.release		= mmc_blk_release,
+#ifdef CONFIG_MMC_DISCARD
+	.ioctl			= mmc_blk_ioctl,
+#endif
 	.getgeo			= mmc_blk_getgeo,
 	.owner			= THIS_MODULE,
 };
@@ -237,17 +358,91 @@ static u32 get_card_status(struct mmc_card *card, struct request *req)
 	cmd.flags = MMC_RSP_SPI_R2 | MMC_RSP_R1 | MMC_CMD_AC;
 	err = mmc_wait_for_cmd(card->host, &cmd, 0);
 	if (err)
-		printk(KERN_ERR "%s: error %d sending status comand",
+		printk(KERN_ERR "%s: error %d sending status comand \n",
 		       req->rq_disk->disk_name, err);
 	return cmd.resp[0];
 }
 
+static int
+mmc_blk_set_blksize(struct mmc_blk_data *md, struct mmc_card *card)
+{
+	int err;
+
+	mmc_claim_host(card->host);
+	err = mmc_set_blocklen(card, 512);
+	mmc_release_host(card->host);
+
+	if (err) {
+		printk(KERN_ERR "%s: unable to set block size to 512: %d\n",
+			md->disk->disk_name, err);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_MMC_DISCARD
+static int mmc_blk_issue_discard_rq(struct mmc_queue *mq, struct request *req)
+{
+	struct mmc_blk_data *md = mq->data;
+	struct mmc_card *card = md->queue.card;
+	unsigned int from, nr;
+	int err = 0;
+
+	mmc_claim_host(card->host);
+
+	if (!mmc_can_trim(card)) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+#ifdef CONFIG_MMC_DISCARD_MOVINAND
+	if (card->cid.manfid == MMC_CSD_MANFID_MOVINAND) {
+		if ((card->pref_trim == 0) && 
+			(card->pref_trim > card->erase_size)) {
+			err = -EOPNOTSUPP;
+			goto out;
+		}
+	}
+#endif /* CONFIG_MMC_DISCARD_MOVINAND */
+
+	from = blk_rq_pos(req);
+	nr = blk_rq_sectors(req);
+
+#ifdef CONFIG_MMC_DISCARD_MERGE
+        err = mmc_do_discard_ops(card, from, nr);
+#else
+	err = mmc_erase(card, from, nr, MMC_TRIM_ARG);
+    /* Execute current discard request
+     * when current discard request is more than DISCARD_THRESHOLD after executing merged discard */
+#endif /*CONFIG_MMC_DISCARD_MERGE*/
+out:
+	spin_lock_irq(&md->lock);
+	__blk_end_request(req, err, blk_rq_bytes(req));
+	spin_unlock_irq(&md->lock);
+	mmc_release_host(card->host);
+
+	return err ? 0 : 1;
+}
+#endif /* CONFIG_MMC_DISCARD */
+
+#ifdef CONFIG_MMC_DISCARD
+static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *req)
+#else /* CONFIG_MMC_DISCARD */
 static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
+#endif /* CONFIG_MMC_DISCARD */
 {
 	struct mmc_blk_data *md = mq->data;
 	struct mmc_card *card = md->queue.card;
 	struct mmc_blk_request brq;
 	int ret = 1, disable_multi = 0;
+
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	if (mmc_bus_needs_resume(card->host)) {
+		mmc_resume_bus(card->host);
+		mmc_blk_set_blksize(md, card);
+	}
+#endif
 
 	mmc_claim_host(card->host);
 
@@ -299,7 +494,6 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			readcmd = MMC_READ_SINGLE_BLOCK;
 			writecmd = MMC_WRITE_BLOCK;
 		}
-
 		if (rq_data_dir(req) == READ) {
 			brq.cmd.opcode = readcmd;
 			brq.data.flags |= MMC_DATA_READ;
@@ -307,6 +501,12 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			brq.cmd.opcode = writecmd;
 			brq.data.flags |= MMC_DATA_WRITE;
 		}
+
+#ifdef _MMC_SAFE_ACCESS_
+		if(card->type == MMC_TYPE_SD)
+			if(!mmc_is_available)
+				goto cmd_sdremove;
+#endif
 
 		mmc_set_data_timeout(&brq.data, card);
 
@@ -331,6 +531,11 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			}
 			brq.data.sg_len = i;
 		}
+#ifdef _MMC_SAFE_ACCESS_	
+		if(card->type == MMC_TYPE_SD)
+			if(!mmc_is_available)
+				goto cmd_sdremove;
+#endif
 
 		mmc_queue_bounce_pre(mq);
 
@@ -352,6 +557,8 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 				continue;
 			}
 			status = get_card_status(card, req);
+		} else if (disable_multi == 1) {
+			disable_multi = 0;
 		}
 
 		if (brq.cmd.error) {
@@ -378,6 +585,19 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			       req->rq_disk->disk_name, brq.stop.error,
 			       brq.stop.resp[0], status);
 		}
+#ifdef _MMC_SAFE_ACCESS_
+		if (brq.cmd.error || brq.data.error || brq.stop.error) {
+			if(card->type == MMC_TYPE_SD){
+				if(mmc_is_available) {
+					status = get_card_status(card, req);
+					omap_mmc1_ldo_status();
+				}
+				else{
+					printk("SD card is removed \n");
+				}
+			}	
+		}
+#endif	
 
 		if (!mmc_host_is_spi(card->host) && rq_data_dir(req) != READ) {
 			do {
@@ -419,7 +639,6 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 				spin_lock_irq(&md->lock);
 				ret = __blk_end_request(req, -EIO, brq.data.blksz);
 				spin_unlock_irq(&md->lock);
-				continue;
 			}
 			goto cmd_err;
 		}
@@ -435,6 +654,14 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 	mmc_release_host(card->host);
 
 	return 1;
+
+cmd_sdremove:
+	spin_lock_irq(&md->lock);
+	while(ret)
+		ret = __blk_end_request(req, -EIO, blk_rq_cur_bytes(req));
+	spin_unlock_irq(&md->lock);
+	mmc_release_host(card->host);
+	return 0;		
 
  cmd_err:
  	/*
@@ -470,6 +697,34 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 	return 0;
 }
 
+#ifdef CONFIG_MMC_DISCARD
+static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
+{
+	struct mmc_blk_data *md = mq->data;
+	struct mmc_card *card = md->queue.card;
+	if (blk_discard_rq(req)) {
+
+#ifdef CONFIG_MMC_DISCARD_DEBUG		
+  printk("[mmc]%s, blk_discard_rq(req)=%d \n",__func__, blk_discard_rq(req));
+#endif
+
+		return mmc_blk_issue_discard_rq(mq, req);
+	} else {
+#ifdef CONFIG_MMC_DISCARD_MERGE
+        	unsigned int rw_start;
+       	unsigned int rw_len;
+        	rw_start =(unsigned int) blk_rq_pos(req);
+        	rw_len = (unsigned int) blk_rq_sectors(req);
+        	mmc_claim_host(card->host);
+
+        	mmc_do_rw_ops(card, rw_start, rw_len);
+        	mmc_release_host(card->host);
+#endif /*CONFIG_MMC_DISCARD_MERGE*/
+
+		return mmc_blk_issue_rw_rq(mq, req);
+	}
+}
+#endif /* CONFIG_MMC_DISCARD */
 
 static inline int mmc_blk_readonly(struct mmc_card *card)
 {
@@ -522,6 +777,7 @@ static struct mmc_blk_data *mmc_blk_alloc(struct mmc_card *card)
 	md->disk->private_data = md;
 	md->disk->queue = md->queue.queue;
 	md->disk->driverfs_dev = &card->dev;
+	md->disk->flags = GENHD_FL_EXT_DEVT;
 
 	/*
 	 * As discussed on lkml, GENHD_FL_REMOVABLE should:
@@ -563,32 +819,6 @@ static struct mmc_blk_data *mmc_blk_alloc(struct mmc_card *card)
 	return ERR_PTR(ret);
 }
 
-static int
-mmc_blk_set_blksize(struct mmc_blk_data *md, struct mmc_card *card)
-{
-	struct mmc_command cmd;
-	int err;
-
-	/* Block-addressed cards ignore MMC_SET_BLOCKLEN. */
-	if (mmc_card_blockaddr(card))
-		return 0;
-
-	mmc_claim_host(card->host);
-	cmd.opcode = MMC_SET_BLOCKLEN;
-	cmd.arg = 512;
-	cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_AC;
-	err = mmc_wait_for_cmd(card->host, &cmd, 5);
-	mmc_release_host(card->host);
-
-	if (err) {
-		printk(KERN_ERR "%s: unable to set block size to %d: %d\n",
-			md->disk->disk_name, cmd.arg, err);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 static int mmc_blk_probe(struct mmc_card *card)
 {
 	struct mmc_blk_data *md;
@@ -602,9 +832,23 @@ static int mmc_blk_probe(struct mmc_card *card)
 	if (!(card->csd.cmdclass & CCC_BLOCK_READ))
 		return -ENODEV;
 
+#ifdef CONFIG_MMC_DISCARD_MERGE
+	err = mmc_discard_init(card);
+	if (err)
+		return err;
+#endif
 	md = mmc_blk_alloc(card);
 	if (IS_ERR(md))
 		return PTR_ERR(md);
+
+#ifdef CONFIG_MMC_DISCARD_MERGE
+	err = mmc_discard_set_prop(card,
+				md->disk->part0.start_sect,
+				md->disk->part0.nr_sects,
+				md->queue.thread);
+	if (err)
+		goto out_discard;
+#endif
 
 	err = mmc_blk_set_blksize(md, card);
 	if (err)
@@ -617,10 +861,17 @@ static int mmc_blk_probe(struct mmc_card *card)
 		cap_str, md->read_only ? "(ro)" : "");
 
 	mmc_set_drvdata(card, md);
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	mmc_set_bus_resume_policy(card->host, 1);
+#endif
 	add_disk(md->disk);
 	return 0;
 
  out:
+#ifdef CONFIG_MMC_DISCARD_MERGE
+	mmc_discard_final(card);
+ out_discard:
+#endif
 	mmc_cleanup_queue(&md->queue);
 	mmc_blk_put(md);
 
@@ -635,12 +886,24 @@ static void mmc_blk_remove(struct mmc_card *card)
 		/* Stop new requests from getting into the queue */
 		del_gendisk(md->disk);
 
+#ifdef CONFIG_MMC_DISCARD_MERGE
+		mmc_set_idle(card, DCS_MMC_DEVICE_REMOVED);
+#endif
+
 		/* Then flush out any already in there */
 		mmc_cleanup_queue(&md->queue);
 
 		mmc_blk_put(md);
 	}
 	mmc_set_drvdata(card, NULL);
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	mmc_set_bus_resume_policy(card->host, 0);
+#endif
+#ifdef CONFIG_MMC_DISCARD_MERGE
+    mmc_claim_host(card->host);
+    mmc_discard_final(card);
+    mmc_release_host(card->host);
+#endif
 }
 
 #ifdef CONFIG_PM
@@ -659,7 +922,9 @@ static int mmc_blk_resume(struct mmc_card *card)
 	struct mmc_blk_data *md = mmc_get_drvdata(card);
 
 	if (md) {
+#ifndef CONFIG_MMC_BLOCK_DEFERRED_RESUME
 		mmc_blk_set_blksize(md, card);
+#endif
 		mmc_queue_resume(&md->queue);
 	}
 	return 0;
@@ -691,7 +956,17 @@ static int __init mmc_blk_init(void)
 	if (res)
 		goto out2;
 
+#ifdef CONFIG_MMC_DISCARD_MERGE
+	res = mmc_create_slab();
+	if (res)
+		goto out3;
+#endif
+
 	return 0;
+#ifdef CONFIG_MMC_DISCARD_MERGE
+ out3:
+	mmc_unregister_driver(&mmc_driver);
+#endif
  out2:
 	unregister_blkdev(MMC_BLOCK_MAJOR, "mmc");
  out:
@@ -700,6 +975,9 @@ static int __init mmc_blk_init(void)
 
 static void __exit mmc_blk_exit(void)
 {
+#ifdef CONFIG_MMC_DISCARD_MERGE
+	mmc_destroy_slab();
+#endif
 	mmc_unregister_driver(&mmc_driver);
 	unregister_blkdev(MMC_BLOCK_MAJOR, "mmc");
 }

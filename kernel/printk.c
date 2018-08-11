@@ -37,6 +37,8 @@
 #include <linux/ratelimit.h>
 #include <linux/kmsg_dump.h>
 #include <linux/syslog.h>
+#include <linux/cpu.h>
+#include <linux/notifier.h>
 
 #include <asm/uaccess.h>
 
@@ -54,6 +56,10 @@ void asmlinkage __attribute__((weak)) early_printk(const char *fmt, ...)
 }
 
 #define __LOG_BUF_LEN	(1 << CONFIG_LOG_BUF_SHIFT)
+
+#ifdef        CONFIG_DEBUG_LL
+extern void printascii(char *);
+#endif
 
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL 4 /* KERN_WARNING */
@@ -165,10 +171,155 @@ void log_buf_kexec_setup(void)
 }
 #endif
 
+#ifdef CONFIG_SAMSUNG_USE_GETLOG
+//{{Mark for GetLog -1/2
+struct struct_kernel_log_mark {
+	u32 special_mark_1;
+	u32 special_mark_2;
+	u32 special_mark_3;
+	u32 special_mark_4;
+	void *p__log_buf;
+};
+
+static struct struct_kernel_log_mark kernel_log_mark = {
+	.special_mark_1 = (('*' << 24) | ('^' << 16) | ('^' << 8) | ('*' << 0)),
+	.special_mark_2 = (('I' << 24) | ('n' << 16) | ('f' << 8) | ('o' << 0)),
+	.special_mark_3 = (('H' << 24) | ('e' << 16) | ('r' << 8) | ('e' << 0)),
+	.special_mark_4 = (('k' << 24) | ('l' << 16) | ('o' << 8) | ('g' << 0)),
+	.p__log_buf = __log_buf,
+};
+//}} Mark for GetLog -1/2
+#endif /* CONFIG_SAMSUNG_USE_GETLOG */
+
+#ifdef CONFIG_SAMSUNG_USE_SEC_LOG_BUF
+#include <linux/io.h>
+#include <linux/platform_device.h>
+#include <mach/hardware.h>
+#include <mach/sec_log_buf.h>
+
+static struct sec_log_buf s_log_buf;
+struct device *sec_log_dev;
+EXPORT_SYMBOL(sec_log_dev);
+
+extern struct class *sec_class;
+
+static ssize_t sec_log_buf_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return log_buf_len;
+}
+
+static DEVICE_ATTR(log, S_IRUGO | S_IWUSR,
+		   sec_log_buf_show, NULL);
+
+static unsigned int sec_log_buf_start = 0;
+static unsigned int sec_log_buf_size = 0;
+const unsigned int sec_log_buf_flag_size = (4 * 1024);
+const unsigned int sec_log_buf_magic = 0x404C4F47;	/* @LOG */
+
+static int __init sec_log_buf_setup(char *str)
+{
+	sec_log_buf_size = memparse(str, &str);
+
+	if (sec_log_buf_size && (*str == '@')) {
+		sec_log_buf_start = simple_strtoul(++str, &str, 0);
+		if (reserve_bootmem(sec_log_buf_start, sec_log_buf_size, BOOTMEM_EXCLUSIVE)) {
+			pr_err("failed to reserve size %d@0x%X\n",
+			       sec_log_buf_size / 1024, sec_log_buf_start);
+			sec_log_buf_start = 0;
+			sec_log_buf_size = 0;
+			goto __return;
+		}
+	}
+
+__return:
+	return 1;
+}
+
+#if defined (CONFIG_ARCH_OMAP3)
+void __init sec_log_buf_reserve_mem(void)
+{
+	sec_log_buf_start = SEC_LOG_BUF_START;
+	sec_log_buf_size = SEC_LOG_BUF_SIZE;
+
+	if (sec_log_buf_start != 0 && sec_log_buf_size != 0) {
+		if (reserve_bootmem(sec_log_buf_start, sec_log_buf_size, BOOTMEM_EXCLUSIVE)) {
+			pr_err("failed to reserve size %d@0x%X\n",
+			       sec_log_buf_size / 1024, sec_log_buf_start);
+			sec_log_buf_start = 0;
+			sec_log_buf_size = 0;
+		}
+	}
+}
+#endif /* CONFIG_ARCH_OMAP3 */
+
+__setup("sec_log=", sec_log_buf_setup);
+
+void sec_log_buf_init(void)
+{
+	char *start;
+	int i, count, copy_log_len, copy_log_start;
+
+	if (sec_log_buf_start == 0 || sec_log_buf_size == 0)
+		return;
+
+	start = (char *)ioremap(sec_log_buf_start, sec_log_buf_size);
+
+	s_log_buf.flag = (unsigned int *)start;
+	s_log_buf.count = (unsigned int *)(start + 4);
+	s_log_buf.data = (char *)(start + sec_log_buf_flag_size);
+
+	sec_log_dev = device_create(sec_class, NULL, 0, NULL, "sec_log");
+	if (IS_ERR(sec_log_dev))
+		pr_err("Failed to create device(sec_log)!\n");
+
+	if (device_create_file(sec_log_dev, &dev_attr_log))
+		pr_err("Failed to create device file(log)!\n");
+
+	if (*s_log_buf.flag == sec_log_buf_magic) {
+		if (log_end < log_buf_len) {
+			copy_log_start = 0;
+			copy_log_len = log_end;
+		} else {
+			copy_log_start = log_end;
+			copy_log_len = log_buf_len;
+		}
+
+		count = (*s_log_buf.count & LOG_BUF_MASK);
+
+		for (i = 0; i < copy_log_len; i++) {
+			*(s_log_buf.data + ((count + i) & LOG_BUF_MASK)) =
+			    *(log_buf + ((copy_log_start + i) & LOG_BUF_MASK));
+		}
+
+		*s_log_buf.count =
+		    ((*s_log_buf.count + copy_log_len) & LOG_BUF_MASK);
+
+		log_buf = s_log_buf.data;
+
+		/* RAM Dump Info */
+		kernel_log_mark.p__log_buf =
+		    (void *)(sec_log_buf_start + sec_log_buf_flag_size);
+
+		log_start = (log_start + count);
+		con_start = (con_start + count);
+		log_end = (log_end + count);
+	}
+#ifdef CONFIG_SAMSUNG_USE_GETLOG
+	kernel_log_mark.p__log_buf =
+		(void *)(sec_log_buf_start + sec_log_buf_flag_size);
+#endif /* CONFIG_SAMSUNG_USE_GETLOG */
+}
+
+#endif /* CONFIG_SAMSUNG_USE_SEC_LOG_BUF */
+
 static int __init log_buf_len_setup(char *str)
 {
 	unsigned size = memparse(str, &str);
 	unsigned long flags;
+#ifdef CONFIG_SAMSUNG_USE_GETLOG
+	unsigned int address_mask =0x0fffffff;
+#endif /* CONFIG_SAMSUNG_USE_GETLOG */
 
 	if (size)
 		size = roundup_pow_of_two(size);
@@ -201,6 +352,11 @@ static int __init log_buf_len_setup(char *str)
 		printk(KERN_NOTICE "log_buf_len: %d\n", log_buf_len);
 	}
 out:
+#ifdef CONFIG_SAMSUNG_USE_GETLOG
+	//{{Mark for GetLog -2/2
+	kernel_log_mark.p__log_buf = (void *)((unsigned int)__log_buf & address_mask);
+	//}} Mark for GetLog -2/2
+#endif /* CONFIG_SAMSUNG_USE_GETLOG */
 	return 1;
 }
 
@@ -259,6 +415,68 @@ static inline void boot_delay_msec(void)
 }
 #endif
 
+/*
+ * Return the number of unread characters in the log buffer.
+ */
+static int log_buf_get_len(void)
+{
+	return logged_chars;
+}
+
+/*
+ * Clears the ring-buffer
+ */
+void log_buf_clear(void)
+{
+	logged_chars = 0;
+}
+
+/*
+ * Copy a range of characters from the log buffer.
+ */
+int log_buf_copy(char *dest, int idx, int len)
+{
+	int ret, max;
+	bool took_lock = false;
+
+	if (!oops_in_progress) {
+		spin_lock_irq(&logbuf_lock);
+		took_lock = true;
+	}
+
+	max = log_buf_get_len();
+	if (idx < 0 || idx >= max) {
+		ret = -1;
+	} else {
+		if (len > max - idx)
+			len = max - idx;
+		ret = len;
+		idx += (log_end - max);
+		while (len-- > 0)
+			dest[len] = LOG_BUF(idx + len);
+	}
+
+	if (took_lock)
+		spin_unlock_irq(&logbuf_lock);
+
+	return ret;
+}
+
+/*
+ * Commands to do_syslog:
+ *
+ * 	0 -- Close the log.  Currently a NOP.
+ * 	1 -- Open the log. Currently a NOP.
+ * 	2 -- Read from the log.
+ * 	3 -- Read all messages remaining in the ring buffer.
+ * 	4 -- Read and clear all messages remaining in the ring buffer
+ * 	5 -- Clear ring buffer.
+ * 	6 -- Disable printk's to console
+ * 	7 -- Enable printk's to console
+ *	8 -- Set level of messages printed to console
+ *	9 -- Return number of unread characters in the log buffer
+ *     10 -- Return size of the log buffer
+ */
 int do_syslog(int type, char __user *buf, int len, bool from_file)
 {
 	unsigned i, j, limit, count;
@@ -528,6 +746,10 @@ static void emit_log_char(char c)
 {
 	LOG_BUF(log_end) = c;
 	log_end++;
+#ifdef CONFIG_SAMSUNG_USE_SEC_LOG_BUF
+	if (s_log_buf.count)
+		(*s_log_buf.count)++;
+#endif /* CONFIG_SAMSUNG_USE_SEC_LOG_BUF */
 	if (log_end - log_start > log_buf_len)
 		log_start = log_end - log_buf_len;
 	if (log_end - con_start > log_buf_len)
@@ -734,6 +956,9 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	printed_len += vscnprintf(printk_buf + printed_len,
 				  sizeof(printk_buf) - printed_len, fmt, args);
 
+#ifdef	CONFIG_DEBUG_LL
+	printascii(printk_buf);
+#endif
 
 	p = printk_buf;
 
@@ -786,6 +1011,7 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 
 				for (tp = tbuf; tp < tbuf + tlen; tp++)
 					emit_log_char(*tp);
+
 				printed_len += tlen;
 			}
 
@@ -802,7 +1028,7 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	 * Try to acquire and then immediately release the
 	 * console semaphore. The release will do all the
 	 * actual magic (print out buffers, wake up klogd,
-	 * etc). 
+	 * etc).
 	 *
 	 * The acquire_console_semaphore_for_printk() function
 	 * will release 'logbuf_lock' regardless of whether it
@@ -983,6 +1209,43 @@ void resume_console(void)
 	console_suspended = 0;
 	release_console_sem();
 }
+
+/**
+ * console_cpu_notify - print deferred console messages after CPU hotplug
+ * @self: pointer to notfier block
+ * @action: cpu-hotplug events
+ * @hcpu: void poniter to pass any data
+ *
+ * If printk() is called from a CPU that is not online yet, the messages
+ * will be spooled but will not show up on the console.  This function is
+ * called when a new CPU comes online or goes offline and ensures that
+ * any such output gets printed.
+ */
+static int __cpuinit console_cpu_notify(struct notifier_block *self,
+	unsigned long action, void *hcpu)
+{
+	switch (action) {
+	case CPU_ONLINE:
+	case CPU_DEAD:
+	case CPU_DYING:
+	case CPU_DOWN_FAILED:
+	case CPU_UP_CANCELED:
+		if (try_acquire_console_sem() == 0)
+			release_console_sem();
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block __cpuinitdata console_nb = {
+	.notifier_call		= console_cpu_notify,
+};
+
+static int __init console_notifier_init(void)
+{
+	register_cpu_notifier(&console_nb);
+	return 0;
+}
+late_initcall(console_notifier_init);
 
 /**
  * acquire_console_sem - lock the console system for exclusive use.

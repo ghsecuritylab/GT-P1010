@@ -81,7 +81,9 @@
 #define TWL_MODULE_PM_RECEIVER	TWL4030_MODULE_PM_RECEIVER
 #define TWL_MODULE_RTC		TWL4030_MODULE_RTC
 #define TWL_MODULE_PWM		TWL4030_MODULE_PWM0
+#define TWL6030_MODULE_CHARGER	TWL4030_MODULE_MAIN_CHARGE
 
+#define TWL6030_MODULE_GASGAUGE 0x0B
 #define TWL6030_MODULE_ID0	0x0D
 #define TWL6030_MODULE_ID1	0x0E
 #define TWL6030_MODULE_ID2	0x0F
@@ -91,6 +93,7 @@
 #define BCI_INTR_OFFSET		2
 #define MADC_INTR_OFFSET	3
 #define USB_INTR_OFFSET		4
+#define CHARGERFAULT_INTR_OFFSET 5
 #define BCI_PRES_INTR_OFFSET	9
 #define USB_PRES_INTR_OFFSET	10
 #define RTC_INTR_OFFSET		11
@@ -107,6 +110,7 @@
 #define GASGAUGE_INTR_OFFSET	17
 #define USBOTG_INTR_OFFSET	4
 #define CHARGER_INTR_OFFSET	2
+#define GPADCSW_INTR_OFFSET	1
 #define RSV_INTR_OFFSET		0
 
 /* INT register offsets */
@@ -141,9 +145,32 @@
 #define TWL6030_CHARGER_CTRL_INT_MASK 	0x10
 #define TWL6030_CHARGER_FAULT_INT_MASK 	0x60
 
+#define TWL6030_MMCCTRL			0xEE
+#define VMMC_AUTO_OFF			(0x1 << 3)
+#define SW_FC				(0x1 << 2)
+#define STS_MMC				0x1
+
+#define TWL6030_CFG_INPUT_PUPD3		0xF2
+#define MMC_PU				(0x1 << 3)
+#define MMC_PD				(0x1 << 2)
+
+/* TWL6030 vibrator registers */
+#define TWL6030_VIBCTRL			0x9B
+#define TWL6030_VIBMODE			0x9C
+#define TWL6030_PWM1ON			0xBA
+#define	TWL6030_PWM1OFF			0xBB
+#define TWL6030_PWM2ON			0xBD
+#define TWL6030_PWM2OFF			0xBE
+
+/* TWL6030 control interface  registers */
+#define TWL6030_TOGGLE1			0x90
+#define TWL6030_TOGGLE2			0x91
+#define TWL6030_TOGGLE3			0x92
 
 #define TWL4030_CLASS_ID 		0x4030
 #define TWL6030_CLASS_ID 		0x6030
+#define T2_REG_DUMP
+
 unsigned int twl_rev(void);
 #define GET_TWL_REV (twl_rev())
 #define TWL_CLASS_IS(class, id)			\
@@ -160,7 +187,9 @@ TWL_CLASS_IS(6030, TWL6030_CLASS_ID)
  */
 int twl_i2c_write_u8(u8 mod_no, u8 val, u8 reg);
 int twl_i2c_read_u8(u8 mod_no, u8 *val, u8 reg);
-
+#ifdef T2_REG_DUMP //TI HS.Yoon 20101124 for TWL5025/5030 register full dump
+int twl_i2c_read_regdump();
+#endif
 /*
  * Read and write several 8-bit registers at once.
  *
@@ -172,6 +201,23 @@ int twl_i2c_read(u8 mod_no, u8 *value, u8 reg, unsigned num_bytes);
 
 int twl6030_interrupt_unmask(u8 bit_mask, u8 offset);
 int twl6030_interrupt_mask(u8 bit_mask, u8 offset);
+int twl6030_init_irq(int irq_num, unsigned irq_base, unsigned irq_end);
+int twl6030_exit_irq(void);
+int twl4030_init_irq(int irq_num, unsigned irq_base, unsigned irq_end);
+int twl4030_exit_irq(void);
+int twl4030_init_chip_irq(const char *chip);
+
+int twl6030_register_notifier(struct notifier_block *nb,
+				unsigned int events);
+int twl6030_unregister_notifier(struct notifier_block *nb,
+				unsigned int events);
+
+/* Card detect Configuration for MMC1 Controller on OMAP4 */
+int twl6030_mmc_card_detect_config(void);
+
+/* MMC1 Controller on OMAP4 uses Phoenix irq for Card detect */
+int twl6030_mmc_card_detect(struct device *dev, int slot);
+
 
 /*----------------------------------------------------------------------*/
 
@@ -371,6 +417,7 @@ int twl6030_interrupt_mask(u8 bit_mask, u8 offset);
 #define DEV_GRP_P1		0x1	/* P1: all OMAP devices */
 #define DEV_GRP_P2		0x2	/* P2: all Modem devices */
 #define DEV_GRP_P3		0x4	/* P3: all peripheral devices */
+#define DEV_GRP_ALL		0x7     /* P1/P2/P3: all devices */
 
 /* Resource groups */
 #define RES_GRP_RES		0x0	/* Reserved */
@@ -383,8 +430,15 @@ int twl6030_interrupt_mask(u8 bit_mask, u8 offset);
 #define RES_GRP_ALL		0x7	/* All resource groups */
 
 #define RES_TYPE2_R0		0x0
+#define RES_TYPE2_R1		0x1
+#define RES_TYPE2_R2		0x2
+#define RES_TYPE2_ALL		0x3
+
+#define RES_TYPE_R0		0x0
 
 #define RES_TYPE_ALL		0x7
+
+#define TRITON_SLEEP_SCRIPT	(1<<3)
 
 /* Resource states */
 #define RES_STATE_WRST		0xF
@@ -462,6 +516,15 @@ struct twl4030_clock_init_data {
 struct twl4030_bci_platform_data {
 	int *battery_tmp_tbl;
 	unsigned int tblsize;
+
+	unsigned int monitoring_interval;
+
+	unsigned int max_charger_currentmA;
+	unsigned int max_charger_voltagemV;
+	unsigned int termination_currentmA;
+
+	unsigned int max_bat_voltagemV;
+	unsigned int low_bat_voltagemV;
 };
 
 /* TWL4030_GPIO_MAX (18) GPIOs, with interrupts */
@@ -516,6 +579,7 @@ enum twl4030_usb_mode {
 
 struct twl4030_usb_data {
 	enum twl4030_usb_mode	usb_mode;
+	        struct device *sensor_dev;
 };
 
 struct twl4030_ins {
@@ -550,11 +614,16 @@ struct twl4030_power_data {
 };
 
 extern void twl4030_power_init(struct twl4030_power_data *triton2_scripts);
+extern void twl4030_power_sr_init(void);
 extern int twl4030_remove_script(u8 flags);
 
 struct twl4030_codec_audio_data {
-	unsigned int	audio_mclk;
+	unsigned int audio_mclk; /* not used, will be removed */
+	unsigned int digimic_delay; /* in ms */
 	unsigned int ramp_delay_value;
+	unsigned int offset_cncl_path;
+	unsigned int check_defaults:1;
+	unsigned int reset_registers:1;
 	unsigned int hs_extmute:1;
 	void (*set_hs_extmute)(int mute);
 };
@@ -562,6 +631,12 @@ struct twl4030_codec_audio_data {
 struct twl4030_codec_vibra_data {
 	unsigned int	audio_mclk;
 	unsigned int	coexist;
+
+	/* timed-output based implementations */
+	int max_timeout;
+	int initial_vibrate;
+	int (*init)(void);
+	void (*exit)(void);
 };
 
 struct twl4030_codec_data {
@@ -570,8 +645,9 @@ struct twl4030_codec_data {
 	struct twl4030_codec_vibra_data		*vibra;
 
 	/* twl6040 */
-	int audpwron_gpio;	/* audio power-on gpio */
-	int naudint_irq;	/* audio interrupt */
+	int audpwron_gpio;		/* audio power-on gpio */
+	unsigned int naudint_irq;	/* audio interrupt */
+	unsigned int irq_base;
 };
 
 struct twl4030_platform_data {
@@ -610,6 +686,7 @@ struct twl4030_platform_data {
 	struct regulator_init_data              *vana;
 	struct regulator_init_data              *vcxio;
 	struct regulator_init_data              *vusb;
+	struct regulator_init_data              *clk32kg;
 };
 
 /*----------------------------------------------------------------------*/
@@ -620,12 +697,160 @@ int twl4030_sih_setup(int module);
 #define TWL4030_VDAC_DEV_GRP		0x3B
 #define TWL4030_VDAC_DEDICATED		0x3E
 #define TWL4030_VAUX1_DEV_GRP		0x17
+#define TWL4030_VAUX1_TYPE		0x18
+#define TWL4030_VAUX1_REMAP		0x19
 #define TWL4030_VAUX1_DEDICATED		0x1A
 #define TWL4030_VAUX2_DEV_GRP		0x1B
+#define TWL4030_VAUX2_TYPE		0x1C
+#define TWL4030_VAUX2_REMAP		0x1D
 #define TWL4030_VAUX2_DEDICATED		0x1E
 #define TWL4030_VAUX3_DEV_GRP		0x1F
+#define TWL4030_VAUX3_TYPE		0x20
+#define TWL4030_VAUX3_REMAP		0x21
 #define TWL4030_VAUX3_DEDICATED		0x22
+#define TWL4030_VAUX4_DEV_GRP		0x23
+#define TWL4030_VAUX4_TYPE		0x24
+#define TWL4030_VAUX4_REMAP		0x25
+#define TWL4030_VAUX4_DEDICATED		0x26
 
+#define TWL4030_VMMC1_DEV_GRP		0x27
+#define TWL4030_VMMC1_TYPE		0x28
+#define TWL4030_VMMC1_REMAP		0x29
+#define TWL4030_VMMC1_DEDICATED		0x2A
+
+#define TWL4030_VMMC2_DEV_GRP		0x2B
+#define TWL4030_VMMC2_TYPE		0x2C
+#define TWL4030_VMMC2_REMAP		0x2D
+#define TWL4030_VMMC2_DEDICATED		0x2E
+
+#define TWL4030_VPLL1_DEV_GRP		0x2F
+#define TWL4030_VPLL1_TYPE		0x30
+#define TWL4030_VPLL1_REMAP		0x31
+#define TWL4030_VPLL1_DEDICATED		0x32
+
+#define TWL4030_VPLL2_DEV_GRP		0x33
+#define TWL4030_VPLL2_TYPE		0x34
+#define TWL4030_VPLL2_REMAP		0x35
+#define TWL4030_VPLL2_DEDICATED		0x36
+
+#define TWL4030_VSIM_DEV_GRP		0x37
+#define TWL4030_VSIM_TYPE		0x38
+#define TWL4030_VSIM_REMAP		0x39
+#define TWL4030_VSIM_DEDICATED		0x3A
+
+#define TWL4030_VDAC_DEV_GRP		0x3B
+#define TWL4030_VDAC_TYPE		0x3C
+#define TWL4030_VDAC_REMAP		0x3D
+#define TWL4030_VDAC_DEDICATED		0x3E
+
+#define TWL4030_VINTANA1_DEV_GRP	0x3F
+#define TWL4030_VINTANA1_TYPE		0x40
+#define TWL4030_VINTANA1_REMAP		0x41
+#define TWL4030_VINTANA1_DEDICATED	0x42
+
+#define TWL4030_VINTANA2_DEV_GRP	0x43
+#define TWL4030_VINTANA2_TYPE		0x44
+#define TWL4030_VINTANA2_REMAP		0x45
+#define TWL4030_VINTANA2_DEDICATED	0x46
+
+#define TWL4030_VINTDIG_DEV_GRP		0x47
+#define TWL4030_VINTDIG_TYPE		0x48
+#define TWL4030_VINTDIG_REMAP		0x49
+#define TWL4030_VINTDIG_DEDICATED	0x4A
+
+#define TWL4030_VIO_DEV_GRP		0x4B
+#define TWL4030_VIO_TYPE		0x4C
+
+#define TWL4030_VIO_REMAP		0x4D
+#define TWL4030_VIO_CFG			0x4E
+#define TWL4030_VIO_MISC_CFG		0x4F
+#define TWL4030_VIO_TEST1		0x50
+#define TWL4030_VIO_TEST2		0x51
+#define TWL4030_VIO_OSC			0x52
+#define TWL4030_VIO_RESERVED		0x53
+#define TWL4030_VIO_VSEL		0x54
+
+#define TWL4030_VDD1_DEV_GRP		0x55
+#define TWL4030_VDD1_TYPE		0x56
+#define TWL4030_VDD1_REMAP		0x57
+#define TWL4030_VDD1_CFG		0x58
+#define TWL4030_VDD1_MISC_CFG		0x59
+#define TWL4030_VDD1_TEST1		0x5A
+#define TWL4030_VDD1_TEST2		0x5B
+#define TWL4030_VDD1_OSC		0x5C
+#define TWL4030_VDD1_RESERVED		0x5D
+#define TWL4030_VDD1_VSEL		0x5E
+#define TWL4030_VDD1_VMODE_CFG		0x5F
+#define TWL4030_VDD1_VFLOOR		0x60
+#define TWL4030_VDD1_VROOF		0x61
+#define TWL4030_VDD1_STEP		0x62
+
+#define TWL4030_VDD2_DEV_GRP		0x63
+#define TWL4030_VDD2_TYPE		0x64
+#define TWL4030_VDD2_REMAP		0x65
+#define TWL4030_VDD2_CFG		0x66
+#define TWL4030_VDD2_MISC_CFG		0x67
+#define TWL4030_VDD2_TEST1		0x68
+#define TWL4030_VDD2_TEST2		0x69
+#define TWL4030_VDD2_OSC		0x6A
+#define TWL4030_VDD2_RESERVED		0x6B
+#define TWL4030_VDD2_VSEL		0x6C
+#define TWL4030_VDD2_VMODE_CFG		0x6D
+#define TWL4030_VDD2_VFLOOR		0x6E
+#define TWL4030_VDD2_VROOF		0x6F
+#define TWL4030_VDD2_STEP		0x70
+
+
+#define TWL4030_VUSB1V5_DEV_GRP		0x71
+#define TWL4030_VUSB1V5_TYPE		0x72
+#define TWL4030_VUSB1V5_REMAP		0x73
+
+#define TWL4030_VUSB1V8_DEV_GRP		0x74
+#define TWL4030_VUSB1V8_TYPE		0x75
+#define TWL4030_VUSB1V8_REMAP		0x76
+
+#define TWL4030_VUSB3V1_DEV_GRP		0x77
+#define TWL4030_VUSB3V1_TYPE		0x78
+#define TWL4030_VUSB3V1_REMAP		0x79
+
+#define TWL4030_VUSBCP_DEV_GRP		0x7A
+#define TWL4030_VUSBCP_TYPE		0x7B
+#define TWL4030_VUSBCP_REMAP		0x7C
+
+#define TWL4030_VUSB_DEDICATED1		0x7D
+#define TWL4030_VUSB_DEDICATED2		0x7E
+
+#define TWL4030_REGEN_DEV_GRP		0x7F
+#define TWL4030_REGEN_TYPE		0x80
+#define TWL4030_REGEN_REMAP		0x81
+
+#define TWL4030_NRESPWRON_DEV_GRP	0x82
+#define TWL4030_NRESPWRON_TYPE		0x83
+#define TWL4030_NRESPWRON_REMAP		0x84
+
+#define TWL4030_CLKEN_DEV_GRP		0x85
+#define TWL4030_CLKEN_TYPE		0x86
+#define TWL4030_CLKEN_REMAP		0x87
+
+#define TWL4030_SYSEN_DEV_GRP		0x88
+#define TWL4030_SYSEN_TYPE		0x89
+#define TWL4030_SYSEN_REMAP		0x8A
+
+#define TWL4030_HFCLKOUT_DEV_GRP	0x8B
+#define TWL4030_HFCLKOUT_TYPE		0x8C
+#define TWL4030_HFCLKOUT_REMAP		0x8D
+
+#define TWL4030_2KCLKOUT_DEV_GRP	0x8E
+#define TWL4030_2KCLKOUT_TYPE		0x8F
+#define TWL4030_2KCLKOUT_REMAP		0x90
+
+#define TWL4030_TRITON_RESET_DEV_GRP	0x91
+#define TWL4030_TRITON_RESET_TYPE	0x92
+#define TWL4030_TRITON_RESET_REMAP	0x93
+
+#define TWL4030_MAINREEF_DEV_GRP	0x94
+#define TWL4030_MAINREEF_TYPE		0x95
+#define TWL4030_MAINREEF_REMAP		0x96
 static inline int twl4030charger_usb_en(int enable) { return 0; }
 
 /*----------------------------------------------------------------------*/
@@ -689,5 +914,54 @@ static inline int twl4030charger_usb_en(int enable) { return 0; }
 
 /* INTERNAL LDOs */
 #define TWL6030_REG_VRTC	47
+#define TWL6030_REG_CLK32KG	48
 
+
+/* LDO Output Voltages */
+#define LDO_1_0V		0
+#define LDO_1_01V		1
+#define LDO_1_2V		2
+#define LDO_1_3V		3
+#define LDO_1_5V		4
+#define LDO_1_8V		5
+#define LDO_1_85V		6
+#define LDO_2_5V		7
+#define LDO_2_6V		8
+#define LDO_2_8V		9
+#define LDO_2_85V		10
+#define LDO_3_0V		11
+#define LDO_3_15V		12
+#define LDO_3_151V		13
+#define LDO_3_152V		14
+#define LDO_3_153V		15
+
+/* Device Group definitions to be used with twl4030_i2c_write_u8() */
+#define	DEV_GRP_BELONG_NONE	DEV_GRP_NULL
+#define	DEV_GRP_BELONG_P1	(DEV_GRP_P1 << 5)
+#define	DEV_GRP_BELONG_P2	(DEV_GRP_P2 << 5)
+#define	DEV_GRP_BELONG_P1_P2	((DEV_GRP_P1 | DEV_GRP_P2) << 5)
+#define	DEV_GRP_BELONG_P3	(DEV_GRP_P3 << 5)
+#define	DEV_GRP_BELONG_P1_P3	((DEV_GRP_P1 | DEV_GRP_P3) << 5)
+#define	DEV_GRP_BELONG_P2_P3	((DEV_GRP_P2 | DEV_GRP_P3) << 5)
+#define	DEV_GRP_BELONG_ALL	((DEV_GRP_P1 | DEV_GRP_P2 | DEV_GRP_P3) << 5)
+
+
+/* Resource Operating Modes for OFF_STATE and SLEEP_STATE */
+
+#define REMAP_OFF		0
+#define REMAP_SLEEP1		1
+#define REMAP_SLEEP2		2
+#define REMAP_SLEEP3		3
+#define REMAP_SLEEP4		4
+#define REMAP_SLEEP5		5
+#define REMAP_SLEEP6		6
+#define REMAP_SLEEP7		7
+#define REMAP_SLEEP		8
+#define REMAP_ACTIVE1		9
+#define REMAP_ACTIVE2		10
+#define REMAP_ACTIVE3		11
+#define REMAP_ACTIVE4		12
+#define REMAP_ACTIVE5		13
+#define REMAP_ACTIVE		14
+#define REMAP_WARM_RESET	15
 #endif /* End of __TWL4030_H */

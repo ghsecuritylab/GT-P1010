@@ -49,8 +49,6 @@ config USB_ULPI
 	  Enable this to support ULPI connected USB OTG transceivers which
 	  are likely found on embedded boards.
 
-	  The only chip currently supported is NXP's ISP1504
-
 config TWL4030_USB
 	tristate "TWL4030 USB Transceiver Driver"
 	depends on TWL4030_CORE && REGULATOR_TWL4030
@@ -61,6 +59,15 @@ config TWL4030_USB
 	  This transceiver supports high and full speed devices plus,
 	  in host mode, low speed.
 
+config TWL6030_USB
+	tristate "TWL6030 USB Transceiver Driver"
+	depends on TWL4030_CORE
+	select USB_OTG_UTILS
+	help
+	  Enable this to support the USB OTG transceiver on TWL6030
+	  family chips. this tranciever has the VBUS and ID GND and OTG
+	  event capability. This tranciever does not have the USB PHY like TWL4030.
+
 config NOP_USB_XCEIV
 	tristate "NOP USB Transceiver Driver"
 	select USB_OTG_UTILS
@@ -69,4 +76,36 @@ config NOP_USB_XCEIV
 	 built-in with usb ip or which are autonomous and doesn't require any
 	 phy programming such as ISP1x04 etc.
 
+config CPCAP_USB
+	tristate "CPCAP USB Transceiver Driver"
+	select USB_OTG_UTILS
+	help
+	  Enable this to support the USB OTG transceiver on the
+	  Motorola CPCAP PMIC
+
+config MICROUSBIC_INTR
+	bool "MicroUSB IC interrupt handler"
+	depends on TWL4030_USB
+
+config SIDELOAD_EN
+	bool "Sideload enable"
+	depends on MACH_TICKERTAPE
+	default y
+
+config FSA9480_MICROUSB
+	bool "FSA9480 MicroUSB Driver"
+	depends on I2C && USB_GADGET
+
+config FSA9480_NOTIFY_USB_CONNECTION_STATE
+	bool "Notify USB Connection State"
+	depends on FSA9480_MICROUSB
+	default n
+	
+config FSA9480_GPIO_I2C
+	bool "FSA9480 MicroUSB for GPIO Emulation I2C"
+	depends on FSA9480_MICROUSB
+	
+config FSA9480_LINE_OUT
+	bool "FSA9480 MicroUSB for LINE OUT"
+	depends on FSA9480_MICROUSB
 endif # USB || OTG

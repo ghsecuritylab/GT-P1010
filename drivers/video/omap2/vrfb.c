@@ -30,6 +30,7 @@
 #include <mach/io.h>
 #include <plat/vrfb.h>
 #include <plat/sdrc.h>
+#include <plat/display.h>
 
 #ifdef DEBUG
 #define DBG(format, ...) pr_debug("VRFB: " format, ## __VA_ARGS__)
@@ -111,7 +112,7 @@ void omap_vrfb_restore_context(void)
 		restore_hw_context(i);
 	}
 }
-
+EXPORT_SYMBOL(omap_vrfb_restore_context); //NCB-TI Fix: OMAPS00230814
 void omap_vrfb_adjust_size(u16 *width, u16 *height,
 		u8 bytespp)
 {
@@ -157,7 +158,7 @@ EXPORT_SYMBOL(omap_vrfb_max_height);
 
 void omap_vrfb_setup(struct vrfb *vrfb, unsigned long paddr,
 		u16 width, u16 height,
-		unsigned bytespp, bool yuv_mode)
+		unsigned bytespp, bool yuv_mode, int rotation)
 {
 	unsigned pixel_size_exp;
 	u16 vrfb_width;
@@ -165,6 +166,9 @@ void omap_vrfb_setup(struct vrfb *vrfb, unsigned long paddr,
 	u8 ctx = vrfb->context;
 	u32 size;
 	u32 control;
+//Patch for OMAPS00237522	
+	u16 temp;
+//Patch for OMAPS00237522
 
 	DBG("omapfb_set_vrfb(%d, %lx, %dx%d, %d, %d)\n", ctx, paddr,
 			width, height, bytespp, yuv_mode);
@@ -175,13 +179,28 @@ void omap_vrfb_setup(struct vrfb *vrfb, unsigned long paddr,
 		bytespp *= 2;
 		width /= 2;
 	}
-
+//Patch for OMAPS00237522         
+#ifndef NO_VRFB_ROT_PATCH
+	/* Configure the vrfb buffer for rotation*/
+	if (rotation == OMAP_DSS_ROT_90 || rotation == OMAP_DSS_ROT_270) {
+		temp = width;
+		width = height;
+		height = temp;
+	}
+#endif
+//Patch for OMAPS00237522
 	if (bytespp == 4)
 		pixel_size_exp = 2;
 	else if (bytespp == 2)
 		pixel_size_exp = 1;
 	else
 		BUG();
+
+	/* VDMA Optimization */
+	/* TODO: VDMA support for RGB16 mode */
+	if (cpu_is_omap3630() && yuv_mode)
+		if (rotation == OMAP_DSS_ROT_90 || rotation == OMAP_DSS_ROT_270)
+			pixel_size_exp = 2;
 
 	vrfb_width = ALIGN(width * bytespp, VRFB_PAGE_WIDTH) / bytespp;
 	vrfb_height = ALIGN(height, VRFB_PAGE_HEIGHT);

@@ -47,7 +47,7 @@ static struct omap_irq_bank {
 } __attribute__ ((aligned(4))) irq_banks[] = {
 	{
 		/* MPU INTC */
-		.base_reg	= 0,
+		.base_reg	= (void __iomem *)0,
 		.nr_irqs	= 96,
 	},
 };
@@ -105,7 +105,13 @@ static void omap_ack_irq(unsigned int irq)
 {
 	intc_bank_write_reg(0x1, &irq_banks[0], INTC_CONTROL);
 }
+// SAMSUNG egkim [
+void omap_acknowledge_interrupts(void)
+{
+  omap_ack_irq(0);
 
+}
+// ]
 static void omap_mask_irq(unsigned int irq)
 {
 	int offset = irq & (~(IRQ_BITS_PER_REG - 1));

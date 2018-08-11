@@ -253,7 +253,9 @@ struct v4l2_capability {
 #define V4L2_CAP_READWRITE              0x01000000  /* read/write systemcalls */
 #define V4L2_CAP_ASYNCIO                0x02000000  /* async I/O */
 #define V4L2_CAP_STREAMING              0x04000000  /* streaming I/O ioctls */
-
+//[ZEUS_CAM+]
+#define V4L2_CAP_STROBE			0x20000000
+//[ZEUS_CAM-]
 /*
  *	V I D E O   I M A G E   F O R M A T
  */
@@ -318,6 +320,12 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_NV16    v4l2_fourcc('N', 'V', '1', '6') /* 16  Y/CbCr 4:2:2  */
 #define V4L2_PIX_FMT_NV61    v4l2_fourcc('N', 'V', '6', '1') /* 16  Y/CrCb 4:2:2  */
 
+/*  The following formats are not defined in the V4L2 specification */
+#define V4L2_PIX_FMT_YUV410  v4l2_fourcc('Y', 'U', 'V', '9') /*  9  YUV 4:1:0     */
+#define V4L2_PIX_FMT_YUV420  v4l2_fourcc('Y', 'U', '1', '2') /* 12  YUV 4:2:0     */
+#define V4L2_PIX_FMT_YYUV    v4l2_fourcc('Y', 'Y', 'U', 'V') /* 16  YUV 4:2:2     */
+#define V4L2_PIX_FMT_HI240   v4l2_fourcc('H', 'I', '2', '4') /*  8  8-bit color   */
+#define V4L2_PIX_FMT_HM12    v4l2_fourcc('H', 'M', '1', '2') /*  8  YUV 4:2:0 16x16 macroblocks */
 /* Bayer formats - see http://www.siliconimaging.com/RGB%20Bayer.htm */
 #define V4L2_PIX_FMT_SBGGR8  v4l2_fourcc('B', 'A', '8', '1') /*  8  BGBG.. GRGR.. */
 #define V4L2_PIX_FMT_SGBRG8  v4l2_fourcc('G', 'B', 'R', 'G') /*  8  GBGB.. RGRG.. */
@@ -589,6 +597,7 @@ struct v4l2_window {
 	__u32			clipcount;
 	void			__user *bitmap;
 	__u8                    global_alpha;
+        __u8                    zorder;
 };
 
 /*
@@ -597,6 +606,7 @@ struct v4l2_window {
 struct v4l2_captureparm {
 	__u32		   capability;	  /*  Supported modes */
 	__u32		   capturemode;	  /*  Current mode */
+	 __u32              currentstate;          /*  Current state */
 	struct v4l2_fract  timeperframe;  /*  Time per frame in .1us units */
 	__u32		   extendedmode;  /*  Driver-specific extensions */
 	__u32              readbuffers;   /*  # of buffers for read */
@@ -604,8 +614,10 @@ struct v4l2_captureparm {
 };
 
 /*  Flags for 'capability' and 'capturemode' fields */
-#define V4L2_MODE_HIGHQUALITY	0x0001	/*  High quality imaging mode */
+#define V4L2_MODE_HIGHQUALITY	0x0002	/*  High quality imaging mode */
 #define V4L2_CAP_TIMEPERFRAME	0x1000	/*  timeperframe field is supported */
+#define V4L2_MODE_PREVIEW	0x0000	/*  preview mode */
+#define V4L2_MODE_CAPTURE	0x0001	/*  capture mode */
 
 struct v4l2_outputparm {
 	__u32		   capability;	 /*  Supported modes */
@@ -923,6 +935,41 @@ struct v4l2_ext_controls {
 	__u32 reserved[2];
 	struct v4l2_ext_control *controls;
 };
+/* Write back device for OMAP4 */
+enum v4l2_writeback_source {
+	V4L2_WB_LCD_1_MANAGER		= 0,
+	V4L2_WB_LCD_2_MANAGER		= 1,
+	V4L2_WB_TV_MANAGER			= 2,
+	V4L2_WB_OVERLAY0			= 3,
+	V4L2_WB_OVERLAY1			= 4,
+	V4L2_WB_OVERLAY2			= 5,
+	V4L2_WB_OVERLAY3			= 6
+};
+
+enum v4l2_writeback_source_type {
+	V4L2_WB_SOURCE_OVERLAY	= 0,
+	V4L2_WB_SOURCE_MANAGER	= 1
+};
+
+enum v4l2_writeback_capturemode {
+	V4L2_WB_CAPTURE_ALL = 0x0,
+	V4L2_WB_CAPTURE_1 = 0x1,
+	V4L2_WB_CAPTURE_1_OF_2 = 0x2,
+	V4L2_WB_CAPTURE_1_OF_3 = 0x3,
+	V4L2_WB_CAPTURE_1_OF_4 = 0x4,
+	V4L2_WB_CAPTURE_1_OF_5 = 0x5,
+	V4L2_WB_CAPTURE_1_OF_6 = 0x6,
+	V4L2_WB_CAPTURE_1_OF_7 = 0x7
+};
+
+struct v4l2_writeback_ioctl_data {
+    int								enabled;
+    int								info_dirty;
+    enum v4l2_writeback_source			source;
+    enum v4l2_writeback_source_type		source_type;
+    struct v4l2_pix_format				pix;
+    enum v4l2_writeback_capturemode		capturemode;
+};
 
 /*  Values for ctrl_class field */
 #define V4L2_CTRL_CLASS_USER 0x00980000	/* Old-style 'user' controls */
@@ -1024,6 +1071,9 @@ enum v4l2_power_line_frequency {
 #define V4L2_CID_CHROMA_AGC                     (V4L2_CID_BASE+29)
 #define V4L2_CID_COLOR_KILLER                   (V4L2_CID_BASE+30)
 #define V4L2_CID_COLORFX			(V4L2_CID_BASE+31)
+#define V4L2_CID_ROTATE                     	(V4L2_CID_BASE+32)
+#define V4L2_CID_BG_COLOR                       (V4L2_CID_BASE+33)
+#define V4L2_CID_LASTP1                         (V4L2_CID_BASE+34)
 enum v4l2_colorfx {
 	V4L2_COLORFX_NONE	= 0,
 	V4L2_COLORFX_BW		= 1,
@@ -1036,16 +1086,125 @@ enum v4l2_colorfx {
 	V4L2_COLORFX_SKIN_WHITEN = 8,
 	V4L2_COLORFX_VIVID = 9,
 };
+//[ZEUS_CAM+]
+///*
+// *  extended control id for V4L2
+//  */ 
+
+#define V4L2_CID_AF                             (V4L2_CID_PRIVATE_BASE + 20)            /* To set up the auto focus mode */
+#define V4L2_CID_ZOOM                   (V4L2_CID_PRIVATE_BASE + 21)            /* To set up the zoom mode */
+#define V4L2_CID_JPEG_TRANSFER  (V4L2_CID_PRIVATE_BASE + 22)            /* To start JPEG transfer */
+#define V4L2_CID_JPEG_SIZE              (V4L2_CID_PRIVATE_BASE + 23)            /* To read JPEG capture Size */
+#define V4L2_CID_THUMBNAIL_SIZE (V4L2_CID_PRIVATE_BASE + 24)            /* To read Thumbnail capture Size */
+#define V4L2_CID_JPEG_QUALITY   (V4L2_CID_PRIVATE_BASE + 25)            /* To set the JPEG image quality */
+#define V4L2_CID_ISO                    (V4L2_CID_PRIVATE_BASE + 26)            /* To set ISO */
+#define V4L2_CID_WB                             (V4L2_CID_PRIVATE_BASE + 27)            /* To set WB */
+#define V4L2_CID_EFFECT                 (V4L2_CID_PRIVATE_BASE + 28)            /* To set Effect */
+#define V4L2_CID_SCENE                  (V4L2_CID_PRIVATE_BASE + 29)            /* To set Scene mode */
+#define V4L2_CID_PHOTOMETRY     (V4L2_CID_PRIVATE_BASE + 30)            /* To set Photometry */
+#define V4L2_CID_WDR                    (V4L2_CID_PRIVATE_BASE + 31)            /* To set WDR */
+#define V4L2_CID_ISC                    (V4L2_CID_PRIVATE_BASE + 33)            /* To set ISC */
+#define V4L2_CID_AEWB                   (V4L2_CID_PRIVATE_BASE + 34)            /* To Lock/Unlock AE & AWB*/
+#define V4L2_CID_ANTISHAKE                      (V4L2_CID_PRIVATE_BASE + 35)            /* To anti-shake */
+#define V4L2_CID_FLASH_CAPTURE  (V4L2_CID_PRIVATE_BASE + 36)            /* To set capture flash mode */
+#define V4L2_CID_FLASH_MOVIE            (V4L2_CID_PRIVATE_BASE + 37)            /* To set AF flash mode */
+#define V4L2_CID_FACE_DETECTION (V4L2_CID_PRIVATE_BASE + 38)    /* To set/unset face detection */
+#define V4L2_CID_PRETTY                 (V4L2_CID_PRIVATE_BASE + 39)    /* To set pretty effect */
+#define V4L2_CID_ESD_INT                (V4L2_CID_PRIVATE_BASE + 40) /*To read interrupt status of "Data output         stop from sensor"*/
+#define V4L2_CID_PRA_VERSION    (V4L2_CID_PRIVATE_BASE + 41) /*Get PRA Version */       
+#define V4L2_CID_AF_VERSION     (V4L2_CID_PRIVATE_BASE + 42) /*Get AF Version */        
+#define V4L2_CID_FOCUS_MODE                             (V4L2_CID_PRIVATE_BASE + 43)
+#define V4L2_CID_FLIP                           (V4L2_CID_PRIVATE_BASE + 44)
+#define V4L2_CID_SELECT_MODE                            (V4L2_CID_PRIVATE_BASE + 45)
+#define V4L2_CID_SELECT_STATE                           (V4L2_CID_PRIVATE_BASE + 46)
+#define V4L2_CID_FW_VERSION     (V4L2_CID_PRIVATE_BASE + 47) /*Get Firmware Version */                                                                                                          
+#define V4L2_CID_FW_THUMBNAIL_OFFSET    (V4L2_CID_PRIVATE_BASE + 48)
+#define V4L2_CID_FW_YUV_OFFSET          (V4L2_CID_PRIVATE_BASE + 49)
+#define V4L2_CID_FW_UPDATE              (V4L2_CID_PRIVATE_BASE + 50)            /* To update camera firmware */
+#define V4L2_CID_FW_DUMP                (V4L2_CID_PRIVATE_BASE + 51) /* To start firmware dump */
+#define V4L2_CID_JPEG_CAPTURE_WIDTH     (V4L2_CID_PRIVATE_BASE+52)
+#define V4L2_CID_JPEG_CAPTURE_HEIGHT    (V4L2_CID_PRIVATE_BASE+53)
+#define V4L2_CID_FW_LASTEST                     (V4L2_CID_PRIVATE_BASE + 54) /* To start firmware dump */
+#define V4L2_CID_FW_DATE                        (V4L2_CID_PRIVATE_BASE + 55) /*Get Firmware Version */  
+#define V4L2_CID_AF_TOUCH                               (V4L2_CID_PRIVATE_BASE + 56)            /* To set up the touch focus mode */
+#define V4L2_CID_TOUCH_AF	(V4L2_CID_PRIVATE_BASE+57)
+#define V4L2_CID_PRIVATE_LASTP1         (V4L2_CID_PRIVATE_BASE + 58)
+//[ZEUS_CAM-]
 #define V4L2_CID_AUTOBRIGHTNESS			(V4L2_CID_BASE+32)
 #define V4L2_CID_BAND_STOP_FILTER		(V4L2_CID_BASE+33)
 
 #define V4L2_CID_ROTATE				(V4L2_CID_BASE+34)
 #define V4L2_CID_BG_COLOR			(V4L2_CID_BASE+35)
-
 #define V4L2_CID_CHROMA_GAIN                    (V4L2_CID_BASE+36)
+//#define V4L2_CID_WB                             (V4L2_CID_BASE+37)
 
+
+#define V4L2_CID_CAM_SENSOR_MAKER	(V4L2_CID_PRIVATE_BASE + 60)
+#define V4L2_CID_CAM_SENSOR_OPTICAL	(V4L2_CID_PRIVATE_BASE + 61)
+#define V4L2_CID_CAM_AF_VER_LOW		(V4L2_CID_PRIVATE_BASE + 62)
+#define V4L2_CID_CAM_AF_VER_HIGH	(V4L2_CID_PRIVATE_BASE + 63)
+#define V4L2_CID_CAM_GAMMA_RG_LOW	(V4L2_CID_PRIVATE_BASE + 64)
+#define V4L2_CID_CAM_GAMMA_RG_HIGH	(V4L2_CID_PRIVATE_BASE + 65)
+#define V4L2_CID_CAM_GAMMA_BG_LOW	(V4L2_CID_PRIVATE_BASE + 66)
+#define V4L2_CID_CAM_GAMMA_BG_HIGH	(V4L2_CID_PRIVATE_BASE + 67)
+#define V4L2_CID_CAM_DUMP_FW		(V4L2_CID_PRIVATE_BASE + 68)
+#define V4L2_CID_CAM_GET_DUMP_SIZE  (V4L2_CID_PRIVATE_BASE + 69)
+#define V4L2_CID_CAMERA_VT_MODE		(V4L2_CID_PRIVATE_BASE + 70)
+#define V4L2_CID_CAMERA_VGA_BLUR  	(V4L2_CID_PRIVATE_BASE + 71)
+#define V4L2_CID_CAMERA_CAPTURE  	(V4L2_CID_PRIVATE_BASE + 72)
+
+#define V4L2_CID_MAIN_SW_DATE_INFO_YEAR		(V4L2_CID_PRIVATE_BASE + 73)
+#define V4L2_CID_MAIN_SW_DATE_INFO_MONTH	(V4L2_CID_PRIVATE_BASE + 74)
+#define V4L2_CID_MAIN_SW_DATE_INFO_DATE		(V4L2_CID_PRIVATE_BASE + 75)
+#define V4L2_CID_MAIN_SW_FW_MINOR_VER		(V4L2_CID_PRIVATE_BASE + 76)
+#define V4L2_CID_MAIN_SW_FW_MAJOR_VER		(V4L2_CID_PRIVATE_BASE + 77)
+#define V4L2_CID_MAIN_SW_PRM_MINOR_VER		(V4L2_CID_PRIVATE_BASE + 78)
+#define V4L2_CID_MAIN_SW_PRM_MAJOR_VER		(V4L2_CID_PRIVATE_BASE + 79)
+
+#define V4L2_CID_CAM_DATE_INFO_YEAR           	(V4L2_CID_PRIVATE_BASE + 80)
+#define V4L2_CID_CAM_DATE_INFO_MONTH           	(V4L2_CID_PRIVATE_BASE + 81)
+#define V4L2_CID_CAM_DATE_INFO_DATE           	(V4L2_CID_PRIVATE_BASE + 82)
+#define V4L2_CID_CAM_SENSOR_VER		           	(V4L2_CID_PRIVATE_BASE + 83)
+#define V4L2_CID_CAM_FW_MINOR_VER           	(V4L2_CID_PRIVATE_BASE + 84)
+#define V4L2_CID_CAM_FW_MAJOR_VER           	(V4L2_CID_PRIVATE_BASE + 85)
+#define V4L2_CID_CAM_PRM_MINOR_VER           	(V4L2_CID_PRIVATE_BASE + 86)
+#define V4L2_CID_CAM_PRM_MAJOR_VER           	(V4L2_CID_PRIVATE_BASE + 87)
+#define V4L2_CID_CAM_FW_VER           	     	(V4L2_CID_PRIVATE_BASE + 88)
+#define V4L2_CID_CAM_SET_FW_ADDR                (V4L2_CID_PRIVATE_BASE + 89)
+#define V4L2_CID_CAM_SET_FW_SIZE                (V4L2_CID_PRIVATE_BASE + 90)
+
+#define V4L2_CID_ROTATION		(V4L2_CID_PRIVATE_BASE + 91)
+#define V4L2_CID_PADDR_Y		(V4L2_CID_PRIVATE_BASE + 92)
+#define V4L2_CID_PADDR_CB		(V4L2_CID_PRIVATE_BASE + 93)
+#define V4L2_CID_PADDR_CR		(V4L2_CID_PRIVATE_BASE + 94)
+#define V4L2_CID_PADDR_CBCR		(V4L2_CID_PRIVATE_BASE + 95)
+#define V4L2_CID_CAM_JPEG_MAIN_SIZE			(V4L2_CID_PRIVATE_BASE + 96)
+#define V4L2_CID_CAM_JPEG_MAIN_OFFSET		(V4L2_CID_PRIVATE_BASE + 97)
+#define V4L2_CID_CAM_JPEG_THUMB_SIZE		(V4L2_CID_PRIVATE_BASE + 98)
+#define V4L2_CID_CAM_JPEG_THUMB_OFFSET		(V4L2_CID_PRIVATE_BASE + 99)
+#define V4L2_CID_CAM_JPEG_POSTVIEW_OFFSET	(V4L2_CID_PRIVATE_BASE + 100)
+#define V4L2_CID_CAM_JPEG_QUALITY				(V4L2_CID_PRIVATE_BASE + 101)
+#define V4L2_CID_STREAM_PAUSE					(V4L2_CID_PRIVATE_BASE + 102)
+#define V4L2_CID_CAM_UPGRADE_FW            		(V4L2_CID_PRIVATE_BASE + 103)
+#define V4L2_CID_CAMERA_CHECK_DATALINE			(V4L2_CID_PRIVATE_BASE + 104)
+#define V4L2_CID_CAMERA_CHECK_DATALINE_STOP     (V4L2_CID_PRIVATE_BASE + 105)
+
+////////////////////////////// lomu.park /////////////////////////////////////////////////
+#define V4L2_CID_CAMERA_AE_AWB_LOCKUNLOCK		(V4L2_CID_PRIVATE_BASE + 106)
+#define V4L2_CID_CAMERA_FACEDETECT_LOCKUNLOCK	(V4L2_CID_PRIVATE_BASE + 107)
+#define V4L2_CID_CAMERA_TOUCH_AF_START_STOP		(V4L2_CID_PRIVATE_BASE + 108)
+enum v4l2_touch_af {
+	TOUCH_AF_STOP = 0,
+	TOUCH_AF_START,
+	TOUCH_AF_MAX,
+};
+
+#define V4L2_CID_CAMERA_OBJECT_POSITION_X		(V4L2_CID_PRIVATE_BASE + 109)
+#define V4L2_CID_CAMERA_OBJECT_POSITION_Y		(V4L2_CID_PRIVATE_BASE + 110)
+
+/////////////////////////////////////////////////////////////////////////////////////////
 /* last CID + 1 */
-#define V4L2_CID_LASTP1                         (V4L2_CID_BASE+37)
+#define V4L2_CID_LASTP1                         (V4L2_CID_BASE+38)
 
 /*  MPEG-class control IDs defined by V4L2 */
 #define V4L2_CID_MPEG_BASE 			(V4L2_CTRL_CLASS_MPEG | 0x900)
@@ -1326,6 +1485,8 @@ enum v4l2_preemphasis {
 };
 #define V4L2_CID_TUNE_POWER_LEVEL		(V4L2_CID_FM_TX_CLASS_BASE + 113)
 #define V4L2_CID_TUNE_ANTENNA_CAPACITOR		(V4L2_CID_FM_TX_CLASS_BASE + 114)
+
+#define V4L2_CID_TEST_PATTERN			(V4L2_CTRL_CLASS_CAMERA | 0x107e)
 
 /*
  *	T U N I N G
@@ -1706,6 +1867,21 @@ struct v4l2_dbg_chip_ident {
 	__u32 revision;    /* chip revision, chip specific */
 } __attribute__ ((packed));
 
+/* VIDIOC_G_CHIP_IDENT_OLD: Deprecated, do not use */
+struct v4l2_chip_ident_old {
+	__u32 match_type;  /* Match type */
+	__u32 match_chip;  /* Match this chip, meaning determined by match_type */
+	__u32 ident;       /* chip identifier as specified in <media/v4l2-chip-ident.h> */
+	__u32 revision;    /* chip revision, chip specific */
+};
+//[ZEUS_CAM+]
+/* VIDIOC_G_PRIV_MEM */
+struct v4l2_priv_mem {
+	__u32 offset;	/* offset to data */
+	__u32 length;	/* memory allocated to ptr or read length */
+	void *ptr;	/* pointer to allocated memory */
+};
+//[ZEUS_CAM-]
 /*
  *	I O C T L   C O D E S   F O R   V I D E O   D E V I C E S
  *
@@ -1809,6 +1985,81 @@ struct v4l2_dbg_chip_ident {
 #define VIDIOC_CROPCAP_OLD     	 _IOR('V', 58, struct v4l2_cropcap)
 #endif
 
-#define BASE_VIDIOC_PRIVATE	192		/* 192-255 are private */
+/* ioctls for Writeback Pipeline */
+#define VIDIOC_CUSTOM_G_WB     _IOWR('V', 255, struct v4l2_writeback_ioctl_data)
+#define VIDIOC_CUSTOM_S_WB     _IOW('V', 254, struct v4l2_writeback_ioctl_data)
 
+#define BASE_VIDIOC_PRIVATE	192		/* 192-255 are private */
+//[ZEUS_CAM+]
+///* Strobe flash light */
+enum v4l2_strobe_control {
+        V4L2_STROBE_CONTROL_OFF                         = 0,    /* turn off the flash light */
+        V4L2_STROBE_CONTROL_ON                          = 1,    /* turn on the flash light */
+        V4L2_STROBE_CONTROL_CHARGE                      = 2,    /* charge the flash light */
+};
+
+enum v4l2_strobe_conf {
+        V4L2_STROBE_OFF                                         = 1,    /* Always off */
+        V4L2_STROBE_ON                                          = 2,    /* Always splashes */
+        V4L2_STROBE_AUTO                                                = 3,    /* Depends on intensity of light */
+        V4L2_STROBE_REDEYE_REDUCTION            = 4,
+        V4L2_STROBE_SLOW_SYNC                           = 5,
+        V4L2_STROBE_FRONT_CURTAIN                       = 6,
+        V4L2_STROBE_REAR_CURTAIN                                = 7,
+        V4L2_STROBE_PERMANENT                           = 8,    /* keep turned on until turning off */
+        V4L2_STROBE_AFGUIDE                                     = 9,    /* AF assist beam */
+        V4L2_STROBE_EXTERNAL                                    = 10,
+};
+
+enum v4l2_strobe_status {
+        V4L2_STROBE_STATUS_ERR                          = 0,
+        V4L2_STROBE_STATUS_BUSY                         = 1, /* while processing configurations */
+        V4L2_STROBE_STATUS_OFF                          = 2,
+        V4L2_STROBE_STATUS_CHARGING                     = 3,
+        V4L2_STROBE_STATUS_CHARGED                      = 4,
+};
+
+/* capabilities field */
+#define V4L2_STROBE_CAP_NONE                            0x0000  /* No strobe supported */
+#define V4L2_STROBE_CAP_OFF                             0x0001  /* Always flash off mode */
+#define V4L2_STROBE_CAP_ON                              0x0002  /* Always use flash light mode */
+#define V4L2_STROBE_CAP_AUTO                            0x0004  /* Flashlight works automatic */
+#define V4L2_STROBE_CAP_REDEYE                  0x0008  /* Red-eye reduction */
+#define V4L2_STROBE_CAP_SLOWSYNC                        0x0010  /* Slow sync */
+#define V4L2_STROBE_CAP_FRONT_CURTAIN   0x0020  /* Front curtain */
+#define V4L2_STROBE_CAP_REAR_CURTAIN            0x0040  /* Rear curtain */
+#define V4L2_STROBE_CAP_PERMANENT               0x0080  /* keep turned on until turning off */
+#define V4L2_STROBE_CAP_EXTERNAL                        0x0100  /* use external strobe */
+
+/* Set mode and Get status */
+struct v4l2_strobe {
+        enum    v4l2_strobe_control control;    /* off/on/charge:0/1/2 */
+        __u32   capabilities;                   /* supported strobe capabilities */
+        enum    v4l2_strobe_conf mode;
+        enum    v4l2_strobe_status status;
+        __u32   flash_ev;                               /* default is 0 and range of value varies from each models */
+        __u32   reserved[4];
+};
+
+#define VIDIOC_S_STROBE     _IOWR ('V', 83, struct v4l2_strobe)
+#define VIDIOC_G_STROBE     _IOR ('V', 84, struct v4l2_strobe)
+
+struct v4l2_exif {
+        __u32 exposure_time_numerator;
+        __u32 exposure_time_denominator;
+        __s32 shutter_speed_numerator;
+        __s32 shutter_speed_denominator;
+        __s32 brigtness_numerator;
+        __s32 brightness_denominator;
+        __u16 iso;
+        __u16 flash;
+        __u16 aperture_numerator;
+        __u16 aperture_denominator;
+        __u16 TV_Value;
+        __u16 SV_Value;
+        __u16 AV_Value;
+        __u16 BV_Value;
+};
+#define VIDIOC_G_EXIF   _IOR ('V', 85, struct v4l2_exif)
+//[ZEUS_CAM-]
 #endif /* __LINUX_VIDEODEV2_H */

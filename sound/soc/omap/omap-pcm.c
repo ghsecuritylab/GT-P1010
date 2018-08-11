@@ -32,6 +32,12 @@
 #include <plat/dma.h>
 #include "omap-pcm.h"
 
+//#define SYED_WA
+#ifdef SYED_WA
+struct file *pDumpFile = NULL;
+static count = 0;
+#endif
+
 static const struct snd_pcm_hardware omap_pcm_hardware = {
 	.info			= SNDRV_PCM_INFO_MMAP |
 				  SNDRV_PCM_INFO_MMAP_VALID |
@@ -101,9 +107,10 @@ static int omap_pcm_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct omap_runtime_data *prtd = runtime->private_data;
 	struct omap_pcm_dma_data *dma_data;
+
 	int err = 0;
 
-	dma_data = snd_soc_dai_get_dma_data(rtd->dai->cpu_dai, substream);
+	dma_data = snd_soc_dai_get_dma_data(rtd->cpu_dai, substream);
 
 	/* return if this is a bufferless transfer e.g.
 	 * codec <--> BT codec or GSM modem -- lg FIXME */
@@ -216,12 +223,19 @@ static int omap_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	int ret = 0;
 
 	spin_lock_irqsave(&prtd->lock, flags);
+#if 0
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		prtd->period_index = 0;
 		/* Configure McBSP internal buffer usage */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		{
+			printk("play start\n");
+		}else
+			printk("rec start\n");
+
 		if (dma_data->set_threshold)
 			dma_data->set_threshold(substream);
 
@@ -233,10 +247,54 @@ static int omap_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		prtd->period_index = -1;
 		omap_stop_dma(prtd->dma_ch);
+		if (cpu_is_omap44xx()) {
+			/* Since we are using self linking, there is a
+		  	 chance that the DMA as re-enabled the channel
+		 	  just after disabling it */
+			while (omap_get_dma_active_status(prtd->dma_ch))
+				omap_stop_dma(prtd->dma_ch);
+		}
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			printk("play stop\n");		
+		else
+			printk("rec stop\n");
 		break;
 	default:
 		ret = -EINVAL;
 	}
+#else
+	if (cmd == SNDRV_PCM_TRIGGER_START || cmd == SNDRV_PCM_TRIGGER_RESUME || cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE) {
+		prtd->period_index = 0;
+		/* Configure McBSP internal buffer usage */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		{
+			printk("play start\n");
+		}else
+			printk("rec start\n");
+
+		if (dma_data->set_threshold)
+			dma_data->set_threshold(substream);
+
+		omap_start_dma(prtd->dma_ch);
+	} else if (cmd == SNDRV_PCM_TRIGGER_STOP || cmd == SNDRV_PCM_TRIGGER_SUSPEND || cmd == SNDRV_PCM_TRIGGER_PAUSE_PUSH) {
+		prtd->period_index = -1;
+		omap_stop_dma(prtd->dma_ch);
+		if (cpu_is_omap44xx()) {
+			/* Since we are using self linking, there is a
+		  	 chance that the DMA as re-enabled the channel
+		 	  just after disabling it */
+			while (omap_get_dma_active_status(prtd->dma_ch))
+				omap_stop_dma(prtd->dma_ch);
+		}
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			printk("play stop\n");		
+		else
+			printk("rec stop\n");
+	} else {
+		ret = -EINVAL;
+	}
+#endif
+
 	spin_unlock_irqrestore(&prtd->lock, flags);
 
 	return ret;
@@ -262,6 +320,17 @@ static snd_pcm_uframes_t omap_pcm_pointer(struct snd_pcm_substream *substream)
 	if (offset >= runtime->buffer_size)
 		offset = 0;
 
+#ifdef SYED_WA
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && (count < 100)) {
+		int BytesWritten = 0;
+
+		if(!(IS_ERR(pDumpFile)))
+			BytesWritten = pDumpFile->f_op->write(pDumpFile, runtime->dma_area, runtime->dma_bytes, &pDumpFile->f_pos);
+
+		count++;
+	}
+#endif
+
 	return offset;
 }
 
@@ -270,7 +339,7 @@ static int omap_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct omap_runtime_data *prtd;
 	int ret;
-
+	printk("pcm open\n");
 	snd_soc_set_runtime_hwparams(substream, &omap_pcm_hardware);
 
 	/* Ensure that buffer size is a multiple of period size */
@@ -278,6 +347,16 @@ static int omap_pcm_open(struct snd_pcm_substream *substream)
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	if (ret < 0)
 		goto out;
+
+	if (cpu_is_omap44xx()) {
+		/* ABE needs a step of 24 * 4 data bits, and HDMI 32 * 4
+		 * Ensure buffer size satisfies both constraints.
+		 */
+		ret = snd_pcm_hw_constraint_step(runtime, 0,
+					 SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 384);
+		if (ret < 0)
+			goto out;
+	}
 
 	prtd = kzalloc(sizeof(*prtd), GFP_KERNEL);
 	if (prtd == NULL) {
@@ -287,6 +366,20 @@ static int omap_pcm_open(struct snd_pcm_substream *substream)
 	spin_lock_init(&prtd->lock);
 	runtime->private_data = prtd;
 
+#ifdef SYED_WA
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		int file_error = 0;
+		pDumpFile = filp_open("/tmp/alsadumpfile.pcm", O_RDWR, 0);
+		printk("AlsaDumpfile is  Opened. Error No = %d\n", file_error);
+
+		if(IS_ERR(pDumpFile)){
+			file_error = PTR_ERR(pDumpFile);
+			printk("AlsaDumpfile is Not Opened. Error No = %d\n", file_error);
+			goto out;
+		}
+	}
+#endif
+
 out:
 	return ret;
 }
@@ -294,8 +387,19 @@ out:
 static int omap_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-
+	printk("pcm_close\n");
 	kfree(runtime->private_data);
+
+#ifdef SYED_WA
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if(!(IS_ERR(pDumpFile))){
+			filp_close(pDumpFile, NULL);
+			printk("AlsaDumpFile is closed\n");
+			pDumpFile = NULL;
+		}
+	}
+#endif
+
 	return 0;
 }
 
@@ -364,9 +468,10 @@ static void omap_pcm_free_dma_buffers(struct snd_pcm *pcm)
 	}
 }
 
-static int omap_pcm_new(struct snd_card *card, struct snd_soc_dai *dai,
-		 struct snd_pcm *pcm)
+static int omap_pcm_new(struct snd_soc_pcm_runtime *rtd)
 {
+	struct snd_card *card = rtd->card->snd_card;
+	struct snd_pcm *pcm = rtd->pcm;
 	int ret = 0;
 
 	if (!card->dev->dma_mask)
@@ -374,14 +479,14 @@ static int omap_pcm_new(struct snd_card *card, struct snd_soc_dai *dai,
 	if (!card->dev->coherent_dma_mask)
 		card->dev->coherent_dma_mask = DMA_BIT_MASK(64);
 
-	if (dai->playback.channels_min) {
+	if (pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream) {
 		ret = omap_pcm_preallocate_dma_buffer(pcm,
 			SNDRV_PCM_STREAM_PLAYBACK);
 		if (ret)
 			goto out;
 	}
 
-	if (dai->capture.channels_min) {
+	if (pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream) {
 		ret = omap_pcm_preallocate_dma_buffer(pcm,
 			SNDRV_PCM_STREAM_CAPTURE);
 		if (ret)
@@ -392,25 +497,45 @@ out:
 	return ret;
 }
 
-struct snd_soc_platform omap_soc_platform = {
-	.name		= "omap-pcm-audio",
-	.pcm_ops 	= &omap_pcm_ops,
+static struct snd_soc_platform_driver omap_soc_platform = {
+	.ops		= &omap_pcm_ops,
 	.pcm_new	= omap_pcm_new,
 	.pcm_free	= omap_pcm_free_dma_buffers,
 };
-EXPORT_SYMBOL_GPL(omap_soc_platform);
 
-static int __init omap_soc_platform_init(void)
+static __devinit int omap_pcm_probe(struct platform_device *pdev)
 {
-	return snd_soc_register_platform(&omap_soc_platform);
+	return snd_soc_register_platform(&pdev->dev,
+			&omap_soc_platform);
 }
-module_init(omap_soc_platform_init);
 
-static void __exit omap_soc_platform_exit(void)
+static int __devexit omap_pcm_remove(struct platform_device *pdev)
 {
-	snd_soc_unregister_platform(&omap_soc_platform);
+	snd_soc_unregister_platform(&pdev->dev);
+	return 0;
 }
-module_exit(omap_soc_platform_exit);
+
+static struct platform_driver omap_pcm_driver = {
+	.driver = {
+			.name = "omap-pcm-audio",
+			.owner = THIS_MODULE,
+	},
+
+	.probe = omap_pcm_probe,
+	.remove = __devexit_p(omap_pcm_remove),
+};
+
+static int __init snd_omap_pcm_init(void)
+{
+	return platform_driver_register(&omap_pcm_driver);
+}
+module_init(snd_omap_pcm_init);
+
+static void __exit snd_omap_pcm_exit(void)
+{
+	platform_driver_unregister(&omap_pcm_driver);
+}
+module_exit(snd_omap_pcm_exit);
 
 MODULE_AUTHOR("Jarkko Nikula <jhnikula@gmail.com>");
 MODULE_DESCRIPTION("OMAP PCM DMA module");

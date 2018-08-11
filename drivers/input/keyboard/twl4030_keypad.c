@@ -34,6 +34,10 @@
 #include <linux/i2c/twl.h>
 #include <linux/slab.h>
 
+void ( *onedram_cp_force_crash ) ( void );
+EXPORT_SYMBOL( onedram_cp_force_crash );
+
+extern int home_key_press_status;
 
 /*
  * The TWL4030 family chips include a keypad controller that supports
@@ -68,6 +72,26 @@ struct twl4030_keypad {
 	struct device *dbg_dev;
 	struct input_dev *input;
 };
+
+struct twl4030_keypad *g_kp;
+ssize_t matrixkey_pressed_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	unsigned int i, j;
+	u16 temp_state;
+	unsigned int count = 0;
+
+	for(i=0; i<TWL4030_MAX_ROWS; i++)
+	{
+		temp_state = g_kp->kp_state[i];
+		for( j=0; j<16; j++)
+		{
+			if(((temp_state>>j)&0x1) == 0x1) count++;
+		}
+	}
+	return sprintf(buf, "%u\n", count);
+}
+
+static DEVICE_ATTR(matrixkey_pressed, S_IRUGO, matrixkey_pressed_show, NULL);
 
 /*----------------------------------------------------------------------*/
 
@@ -179,6 +203,22 @@ static int twl4030_read_kp_matrix_state(struct twl4030_keypad *kp, u16 *state)
 	int row;
 	int ret = twl4030_kpread(kp, new_state,
 				 KEYP_FULL_CODE_7_0, kp->n_rows);
+
+
+#if defined(CONFIG_INPUT_HARD_RESET_KEY) && (CONFIG_SAMSUNG_KERNEL_DEBUG_USER)
+	if((new_state[1] == 2) && home_key_press_status)
+	{
+		printk(KERN_ERR "%s : Force Crash by keypad\n", __func__);
+		panic("__forced_upload");
+	}
+	else if( ( new_state[ 2 ] == 2 ) && home_key_press_status ) {
+		printk( KERN_ERR "%s : CP Force Crash by keypad\n", __func__ );
+
+		if( onedram_cp_force_crash )
+			onedram_cp_force_crash();
+	}
+#endif
+
 	if (ret >= 0)
 		for (row = 0; row < kp->n_rows; row++)
 			state[row] = twl4030_col_xlate(kp, new_state[row]);
@@ -236,12 +276,15 @@ static void twl4030_kp_scan(struct twl4030_keypad *kp, bool release_all)
 			if (!(changed & (1 << col)))
 				continue;
 
+#if defined(CONFIG_SAMSUNG_KERNEL_DEBUG_USER)
 			dev_dbg(kp->dbg_dev, "key [%d:%d] %s\n", row, col,
 				(new_state[row] & (1 << col)) ?
 				"press" : "release");
+#endif
 
 			code = MATRIX_SCAN_CODE(row, col, TWL4030_ROW_SHIFT);
-			input_event(input, EV_MSC, MSC_SCAN, code);
+/* Block sending scan code */
+//			input_event(input, EV_MSC, MSC_SCAN, code);
 			input_report_key(input, kp->keymap[code],
 					 new_state[row] & (1 << col));
 		}
@@ -347,9 +390,19 @@ static int __devinit twl4030_kp_probe(struct platform_device *pdev)
 	kp = kzalloc(sizeof(*kp), GFP_KERNEL);
 	input = input_allocate_device();
 	if (!kp || !input) {
+		return -ENOMEM;
+	}
+
+	g_kp = kp;
+	struct kobject *matrixkey;
+	matrixkey = kobject_create_and_add("matrixkey", NULL);
+	if (!matrixkey) {
+		printk("Failed to create sysfs(matrixkey)!\n");
 		error = -ENOMEM;
 		goto err1;
 	}
+	if (sysfs_create_file(matrixkey, &dev_attr_matrixkey_pressed.attr)< 0)
+		printk("Failed to create device file(%s)!\n", dev_attr_matrixkey_pressed.attr.name);
 
 	/* Get the debug Device */
 	kp->dbg_dev = &pdev->dev;
@@ -368,8 +421,8 @@ static int __devinit twl4030_kp_probe(struct platform_device *pdev)
 
 	input_set_capability(input, EV_MSC, MSC_SCAN);
 
-	input->name		= "TWL4030 Keypad";
-	input->phys		= "twl4030_keypad/input0";
+	input->name		= "sec_key";
+	input->phys		= "sec_key/input0";
 	input->dev.parent	= &pdev->dev;
 
 	input->id.bustype	= BUS_HOST;
@@ -406,23 +459,22 @@ static int __devinit twl4030_kp_probe(struct platform_device *pdev)
 	if (error) {
 		dev_info(kp->dbg_dev, "request_irq failed for irq no=%d\n",
 			kp->irq);
-		goto err3;
+		goto err2;
 	}
 
 	/* Enable KP and TO interrupts now. */
 	reg = (u8) ~(KEYP_IMR1_KP | KEYP_IMR1_TO);
 	if (twl4030_kpwrite_u8(kp, reg, KEYP_IMR1)) {
 		error = -EIO;
-		goto err4;
+		goto err3;
 	}
 
 	platform_set_drvdata(pdev, kp);
 	return 0;
 
-err4:
+err3:
 	/* mask all events - we don't care about the result */
 	(void) twl4030_kpwrite_u8(kp, 0xff, KEYP_IMR1);
-err3:
 	free_irq(kp->irq, NULL);
 err2:
 	input_unregister_device(input);

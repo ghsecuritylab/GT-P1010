@@ -49,6 +49,7 @@
 #define N_V253		19	/* Codec control over voice modem */
 #define N_CAIF		20      /* CAIF protocol for talking to modems */
 #define N_GSM0710	21	/* GSM 0710 Mux */
+#define N_TI_WL		22	/* Texas Instruments WiLink shared transport */
 
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
@@ -551,6 +552,9 @@ static inline void tty_audit_push_task(struct task_struct *tsk,
 {
 }
 #endif
+
+/* tty_io.c */
+extern int __init tty_init(void);
 
 /* tty_ioctl.c */
 extern int n_tty_ioctl_helper(struct tty_struct *tty, struct file *file,

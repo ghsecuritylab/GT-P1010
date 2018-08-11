@@ -91,7 +91,7 @@ static struct dma_channel *dma_channel_allocate(struct dma_controller *c,
 			channel = &(musb_channel->channel);
 			channel->private_data = musb_channel;
 			channel->status = MUSB_DMA_STATUS_FREE;
-			channel->max_len = 0x10000;
+			channel->max_len = 0x100000;
 			/* Tx => mode 1; Rx => mode 0 */
 			channel->desired_mode = transmit;
 			channel->actual_len = 0;
@@ -143,6 +143,11 @@ static void configure_channel(struct dma_channel *channel,
 				? (1 << MUSB_HSDMA_TRANSMIT_SHIFT)
 				: 0);
 
+	if (musb_channel->transmit)
+               controller->tx_active |= (1 << bchannel);
+       else
+               controller->rx_active |= (1 << bchannel);
+
 	/* address/count */
 	musb_write_hsdma_addr(mbase, bchannel, dma_addr);
 	musb_write_hsdma_count(mbase, bchannel, len);
@@ -158,6 +163,8 @@ static int dma_channel_program(struct dma_channel *channel,
 				dma_addr_t dma_addr, u32 len)
 {
 	struct musb_dma_channel *musb_channel = channel->private_data;
+	struct musb_dma_controller *controller = musb_channel->controller;
+	struct musb *musb = controller->private_data;
 
 	DBG(2, "ep%d-%s pkt_sz %d, dma_addr 0x%x length %d, mode %d\n",
 		musb_channel->epnum,
@@ -167,16 +174,34 @@ static int dma_channel_program(struct dma_channel *channel,
 	BUG_ON(channel->status == MUSB_DMA_STATUS_UNKNOWN ||
 		channel->status == MUSB_DMA_STATUS_BUSY);
 
+	/*
+	 * make sure the DMA address is 4 byte aligned, if not
+	 * we use the PIO mode for OMAP 3630 and beyond
+	 */
+	if ((dma_addr % 4) && (musb->hwvers >= MUSB_HWVERS_1800))
+		return false;
+
+        /* In version 1.4 and 1.8, if two DMA channels are simultaneously
+         * enabled in opposite directions, there is a chance that
+         * the DMA controller will hang. However, it is safe to
+         * have multiple DMA channels enabled in the same direction
+         * at the same time.
+         */
+       if (musb->hwvers == MUSB_HWVERS_1400 ||
+               musb->hwvers == MUSB_HWVERS_1800) {
+               if (musb_channel->transmit && controller->rx_active)
+                       return false;
+               else if (!musb_channel->transmit && controller->tx_active)
+                       return false;
+       }
+
 	channel->actual_len = 0;
 	musb_channel->start_addr = dma_addr;
 	musb_channel->len = len;
 	musb_channel->max_packet_sz = packet_sz;
 	channel->status = MUSB_DMA_STATUS_BUSY;
 
-	if ((mode == 1) && (len >= packet_sz))
-		configure_channel(channel, packet_sz, 1, dma_addr, len);
-	else
-		configure_channel(channel, packet_sz, 0, dma_addr, len);
+	configure_channel(channel, packet_sz, mode, dma_addr, len);
 
 	return true;
 }
@@ -221,6 +246,10 @@ static int dma_channel_abort(struct dma_channel *channel)
 		musb_write_hsdma_addr(mbase, bchannel, 0);
 		musb_write_hsdma_count(mbase, bchannel, 0);
 		channel->status = MUSB_DMA_STATUS_FREE;
+	 if (musb_channel->transmit)
+                    musb_channel->controller->tx_active &= ~(1 << bchannel);
+              else
+                    musb_channel->controller->rx_active &= ~(1 << bchannel);
 	}
 
 	return 0;
@@ -308,6 +337,13 @@ static irqreturn_t dma_controller_irq(int irq, void *private_data)
 
 				channel->status = MUSB_DMA_STATUS_FREE;
 
+                               if (musb_channel->transmit)
+                                       controller->tx_active &=
+                                                       ~(1 << bchannel);
+                               else
+                                       controller->rx_active &=
+                                                       ~(1 << bchannel);				
+
 				/* completed */
 				if ((devctl & MUSB_DEVCTL_HM)
 					&& (musb_channel->transmit)
@@ -366,7 +402,7 @@ dma_controller_create(struct musb *musb, void __iomem *base)
 	struct musb_dma_controller *controller;
 	struct device *dev = musb->controller;
 	struct platform_device *pdev = to_platform_device(dev);
-	int irq = platform_get_irq(pdev, 1);
+	int irq = platform_get_irq_byname(pdev, "dma");
 
 	if (irq == 0) {
 		dev_err(dev, "No DMA interrupt line!\n");

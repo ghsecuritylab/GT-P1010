@@ -216,7 +216,7 @@ static inline int setup_affinity(unsigned int irq, struct irq_desc *desc)
 void __disable_irq(struct irq_desc *desc, unsigned int irq, bool suspend)
 {
 	if (suspend) {
-		if (!desc->action || (desc->action->flags & IRQF_TIMER))
+		if (!desc->action || (desc->action->flags & IRQF_NO_SUSPEND))
 			return;
 		desc->status |= IRQ_SUSPENDED;
 	}
@@ -962,6 +962,14 @@ static struct irqaction *__free_irq(unsigned int irq, void *dev_id)
 
 	return action;
 }
+
+int omap_setup_irq(unsigned int irq, struct irqaction *act)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+
+	return __setup_irq(irq, desc, act);
+}
+EXPORT_SYMBOL(omap_setup_irq);
 
 /**
  *	remove_irq - free an interrupt
